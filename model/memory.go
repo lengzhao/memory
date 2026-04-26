@@ -106,6 +106,10 @@ type MemoryItem struct {
 	Version       int           `gorm:"column:version;type:integer;default:1"` // Optimistic locking
 	DedupeKey     *string       `gorm:"column:dedupe_key;type:text;uniqueIndex:idx_namespace_dedupe"`
 	EmbeddingRef  *string       `gorm:"column:embedding_ref;type:text"` // Reserved for future vector support
+
+	// TokenizedText stores jiebago tokenized content for Chinese FTS search.
+	// Format: space-separated tokens (e.g., "北京 清华大学 毕业")
+	TokenizedText string `gorm:"column:tokenized_text;type:text"`
 }
 
 // TableName specifies the table name for MemoryItem

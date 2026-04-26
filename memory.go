@@ -103,12 +103,9 @@ var (
 	// Configuration
 	DefaultConfig = store.DefaultConfig
 
-	// Initialization
+	// Initialization (set Config.AutoMigrate=true to run migration automatically)
 	InitDB = store.InitDB
 	Close  = store.Close
-
-	// Migration
-	Migrate = store.Migrate
 )
 
 // Service types
@@ -131,10 +128,7 @@ type (
 	Extractor        = service.Extractor
 	ExtractRequest   = service.ExtractRequest
 	ExtractedMemory  = service.ExtractedMemory
-	ExtractResult    = service.ExtractResult
-
-	// Logger for extractor (optional, nil = silent mode)
-	Logger = service.Logger
+	ExtractResult = service.ExtractResult
 )
 
 // Error types（实现位于 service 包，根包重导出以单 import 使用）
@@ -170,10 +164,24 @@ var (
 // Service functions
 var (
 	// Create new service/extractor instances
-	NewMemoryService   = service.NewMemoryService
-	NewPolicyManager   = service.NewPolicyManager
-	NewExtractor       = service.NewExtractor
-	NewDecisionEngine  = service.NewDecisionEngine
+	NewMemoryService  = service.NewMemoryService
+	NewPolicyManager  = service.NewPolicyManager
+	NewExtractor      = service.NewExtractor
+	NewDecisionEngine = service.NewDecisionEngine
+
+	// QuickExtract is a convenience function for code-only extraction.
+	// Pass LLM config directly without DB setup.
+	QuickExtract = service.QuickExtract
+)
+
+// Logging allows users to configure their own slog handler.
+// Example:
+//
+//	handler := slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelDebug})
+//	memory.SetLogger(slog.New(handler))
+var (
+	SetLogger = service.SetLogger
+	GetLogger = service.GetLogger
 )
 
 // 下列符号在 service 包定义，根包再导出便于单 import。

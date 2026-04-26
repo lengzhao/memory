@@ -1,4 +1,5 @@
 // Package memory_test provides usage examples for the memory package.
+// These examples appear in the Go documentation (pkg.go.dev).
 package memory_test
 
 import (
@@ -12,7 +13,7 @@ import (
 
 // Example demonstrates basic usage of the memory package.
 func Example() {
-	// Initialize database
+	// Initialize database (DefaultConfig has AutoMigrate enabled)
 	cfg := memory.DefaultConfig()
 	cfg.Path = "example.db"
 
@@ -21,11 +22,6 @@ func Example() {
 		log.Fatal(err)
 	}
 	defer memory.Close(db)
-
-	// Run migrations
-	if err := memory.Migrate(db); err != nil {
-		log.Fatal(err)
-	}
 
 	// Create a memory item
 	item := memory.MemoryItem{
@@ -53,26 +49,60 @@ func Example() {
 	// Output: Created item with ID length: 26
 }
 
-// Example_extractor demonstrates automatic memory extraction from dialog.
-func Example_extractor() {
-	// Initialize database
+// Example_memoryService demonstrates using MemoryService for common operations.
+func Example_memoryService() {
 	db, err := memory.InitDB(memory.DefaultConfig())
 	if err != nil {
 		log.Fatal(err)
 	}
 	defer memory.Close(db)
 
-	// Seed default LLM config and prompt (required for extraction)
-	// In production, these would be configured by the user
+	// Create service
+	svc := memory.NewMemoryService(db)
+	ctx := context.Background()
+
+	// Store a memory
+	id, err := svc.Remember(ctx, memory.RememberRequest{
+		Namespace:     "user/preferences",
+		NamespaceType: memory.NamespaceProfile,
+		Title:         "Theme Preference",
+		Content:       "User prefers dark theme",
+		SourceType:    memory.SourceAgent,
+		Importance:    80,
+		Confidence:    0.95,
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+	fmt.Printf("Stored memory: %s...\n", id[:8])
+
+	// Recall memories
+	hits, err := svc.Recall(ctx, memory.RecallRequest{
+		Namespaces: []string{"user/preferences"},
+		TopK:       10,
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+	fmt.Printf("Found %d memories\n", len(hits))
+}
+
+// Example_extractor demonstrates automatic memory extraction from dialog.
+func Example_extractor() {
+	db, err := memory.InitDB(memory.DefaultConfig())
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer memory.Close(db)
 
 	// Create extractor
 	extractor := memory.NewExtractor(db)
 
-	// Extract memories from dialog
+	// Extract memories from dialog (DryRun = preview only)
 	req := memory.ExtractRequest{
 		DialogText:    "我喜欢用深色主题，浅色主题太刺眼了",
 		MinConfidence: 0.7,
-		DryRun:        true, // Preview only, don't save
+		DryRun:        true,
 	}
 
 	result, err := extractor.Extract(context.Background(), req)
@@ -86,33 +116,4 @@ func Example_extractor() {
 	for _, mem := range result.Memories {
 		fmt.Printf("- [%s] %s (confidence: %.2f)\n", mem.Namespace, mem.Title, mem.Confidence)
 	}
-}
-
-// Example_namespace shows available namespace types (simplified 4 categories).
-func Example_namespace() {
-	// These are the 4 simplified namespace types for organizing memories:
-	_ = memory.NamespaceTransient // Temporary conversation context
-	_ = memory.NamespaceProfile   // User preferences and profile
-	_ = memory.NamespaceAction    // Tasks and actionable items
-	_ = memory.NamespaceKnowledge // Knowledge, skills, and procedures
-}
-
-// Example_ttl shows available TTL policies.
-func Example_ttl() {
-	// Fixed: Expires after a fixed duration from creation
-	_ = memory.TTLFixed
-
-	// Sliding: Expires after a fixed duration from last access
-	_ = memory.TTLSliding
-
-	// Manual: Never expires unless explicitly deleted
-	_ = memory.TTLManual
-}
-
-// Example_providers shows supported LLM providers.
-func Example_providers() {
-	_ = memory.ProviderOpenAI // OpenAI (GPT-4, GPT-3.5)
-	_ = memory.ProviderClaude // Anthropic Claude
-	_ = memory.ProviderOllama // Local Ollama models
-	_ = memory.ProviderCustom // Custom API endpoint
 }

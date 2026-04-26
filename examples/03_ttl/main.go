@@ -24,7 +24,6 @@ func main() {
 	}
 	defer memory.Close(db)
 
-	memory.Migrate(db)
 	svc := memory.NewMemoryService(db)
 
 	fmt.Println("=== TTL（生存时间）示例 ===")

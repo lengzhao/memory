@@ -24,7 +24,6 @@ func main() {
 	}
 	defer memory.Close(db)
 
-	memory.Migrate(db)
 
 	fmt.Println("=== Namespace策略管理示例 ===")
 

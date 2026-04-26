@@ -25,7 +25,6 @@ func main() {
 	}
 	defer memory.Close(db)
 
-	memory.Migrate(db)
 
 	// 事件收集器
 	var events []string

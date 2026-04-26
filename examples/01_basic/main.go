@@ -6,6 +6,8 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"log/slog"
+	"os"
 	"time"
 
 	"github.com/lengzhao/memory"
@@ -14,10 +16,16 @@ import (
 func main() {
 	ctx := context.Background()
 
-	// 1. 初始化数据库
+	// 配置结构化日志（可选，不配置则使用默认）
+	// 示例：使用 JSON 格式输出到 stdout，级别为 Debug
+	handler := slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
+		Level: slog.LevelDebug,
+	})
+	memory.SetLogger(slog.New(handler))
+
+	// 1. 初始化数据库 (DefaultConfig 已启用 AutoMigrate)
 	fmt.Println("=== 1. 初始化数据库 ===")
 	cfg := memory.DefaultConfig()
-	// cfg.Path = ":memory:" 使用内存数据库，方便测试
 	cfg.Path = "example.db" // 文件数据库，方便查看
 
 	db, err := memory.InitDB(cfg)
@@ -25,10 +33,6 @@ func main() {
 		log.Fatal(err)
 	}
 	defer memory.Close(db)
-
-	if err := memory.Migrate(db); err != nil {
-		log.Fatal(err)
-	}
 	fmt.Println("数据库初始化完成")
 
 	// 2. 创建MemoryService
@@ -101,15 +105,15 @@ func main() {
 	}
 
 	// 7. 全文搜索
-	fmt.Println("\n=== 6. 全文搜索 '文档' ===")
+	fmt.Println("\n=== 6. 全文搜索 '知识星球文档' ===")
 	searchHits, err := svc.Recall(ctx, memory.RecallRequest{
-		Query: "文档",
+		Query: "知识星球文档",
 		TopK:  10,
 	})
 	if err != nil {
 		log.Fatal(err)
 	}
-	fmt.Printf("搜索 '文档' 找到 %d 条结果:\n", len(searchHits))
+	fmt.Printf("搜索 '知识星球文档' 找到 %d 条结果:\n", len(searchHits))
 	for _, hit := range searchHits {
 		fmt.Printf("  - %s: %s\n", hit.Title, hit.Content)
 	}

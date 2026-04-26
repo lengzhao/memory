@@ -13,21 +13,25 @@ import (
 
 // Config holds database configuration
 type Config struct {
-	Path       string
-	WALEnabled bool
-	LogLevel   logger.LogLevel
+	Path        string
+	WALEnabled  bool
+	LogLevel    logger.LogLevel
+	AutoMigrate bool // Automatically run Migrate on InitDB if true
 }
 
-// DefaultConfig returns default database configuration
+// DefaultConfig returns default database configuration.
+// AutoMigrate defaults to true for ease of use.
 func DefaultConfig() Config {
 	return Config{
-		Path:       "memory.db",
-		WALEnabled: true,
-		LogLevel:   logger.Silent,
+		Path:        "memory.db",
+		WALEnabled:  true,
+		LogLevel:    logger.Silent,
+		AutoMigrate: true,
 	}
 }
 
-// InitDB initializes the database connection with GORM
+// InitDB initializes the database connection with GORM.
+// If cfg.AutoMigrate is true, it automatically runs Migrate after connection.
 func InitDB(cfg Config) (*gorm.DB, error) {
 	// Build DSN with pragmas
 	dsn := buildDSN(cfg)
@@ -42,6 +46,13 @@ func InitDB(cfg Config) (*gorm.DB, error) {
 	// Enable foreign keys
 	if err := db.Exec("PRAGMA foreign_keys = ON").Error; err != nil {
 		return nil, fmt.Errorf("failed to enable foreign keys: %w", err)
+	}
+
+	// Auto migrate if requested
+	if cfg.AutoMigrate {
+		if err := Migrate(db); err != nil {
+			return nil, fmt.Errorf("auto migration failed: %w", err)
+		}
 	}
 
 	return db, nil

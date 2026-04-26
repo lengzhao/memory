@@ -66,17 +66,9 @@ func (e openAIError) Error() string {
 	return fmt.Sprintf("OpenAI API error: %s (type: %s, code: %s)", e.Message, e.Type, e.Code)
 }
 
-// Logger is a minimal logging interface for the extractor.
-// Callers can provide a simple Logger implementation (e.g., using log.Printf).
-// If nil, no logs will be output (silent mode for library use).
-type Logger interface {
-	Printf(format string, v ...interface{})
-}
-
 // Extractor handles dialog to memory extraction
 type Extractor struct {
-	db     *gorm.DB
-	logger Logger // optional logger, nil = silent
+	db *gorm.DB
 }
 
 // NewExtractor creates a new extractor instance
@@ -84,19 +76,31 @@ func NewExtractor(db *gorm.DB) *Extractor {
 	return &Extractor{db: db}
 }
 
-// WithLogger sets the optional logger for the extractor.
-// Returns the extractor for method chaining.
-// If logger is nil or never called, the extractor runs in silent mode (no logs).
-func (e *Extractor) WithLogger(logger Logger) *Extractor {
-	e.logger = logger
-	return e
+// QuickExtract is a convenience function for code-only extraction without DB setup.
+// Useful for simple scripts or when you want to pass config directly each time.
+// Example:
+//
+//	cfg := &model.LLMConfig{
+//	    Provider: model.LLMProviderOpenAI,
+//	    APIKey:   os.Getenv("OPENAI_API_KEY"),
+//	    Model:    "gpt-4o",
+//	}
+//	result, err := service.QuickExtract(ctx, db, dialogText, cfg)
+func QuickExtract(ctx context.Context, db *gorm.DB, dialogText string, llmCfg *model.LLMConfig) (*ExtractResult, error) {
+	extractor := NewExtractor(db)
+	return extractor.Extract(ctx, ExtractRequest{
+		DialogText:       dialogText,
+		LLMConfig:        llmCfg,
+		ExtractionPrompt: nil, // Use builtin
+		MinConfidence:    0.7,
+	})
 }
 
 // ExtractRequest represents a dialog extraction request
 type ExtractRequest struct {
 	DialogText        string
-	LLMConfigID       string // empty = use default
-	PromptID          string // empty = use default
+	LLMConfigID       string // empty = use default (from DB or fallback)
+	PromptID          string // empty = use default (from DB or builtin)
 	ContextMemories   []string
 	MinConfidence     float64 // default 0.7
 	DryRun            bool
@@ -112,6 +116,14 @@ type ExtractRequest struct {
 	// ResolutionContext is optional free text: user display name, who 他/她/经理 refers to, session
 	// participants, etc. The model is instructed to replace vague references in stored title/content/summary.
 	ResolutionContext string
+
+	// LLMConfig allows passing config directly (no DB needed).
+	// If set, overrides LLMConfigID and skips DB lookup.
+	LLMConfig *model.LLMConfig
+
+	// ExtractionPrompt allows passing prompt directly (no DB needed).
+	// If set, overrides PromptID and skips DB lookup.
+	ExtractionPrompt *model.ExtractionPrompt
 }
 
 // ExtractedMemory represents a single extracted memory item
@@ -179,38 +191,30 @@ func (e *Extractor) Extract(ctx context.Context, req ExtractRequest) (*ExtractRe
 		}, nil
 	}
 
-	// Get default LLM config if not specified
-	llmConfigID := req.LLMConfigID
-	if llmConfigID == "" {
-		var cfg model.LLMConfig
-		if err := e.db.WithContext(ctx).Where("is_default = ?", true).First(&cfg).Error; err != nil {
-			return nil, fmt.Errorf("no default LLM config found: %w", err)
-		}
-		llmConfigID = cfg.ID
-	}
-
-	prompt, err := e.resolveExtractionPrompt(ctx, req.PromptID)
+	// Resolve LLM config: use provided, or lookup from DB, or fail
+	llmConfig, llmConfigID, err := e.resolveLLMConfig(ctx, req)
 	if err != nil {
 		return nil, err
 	}
 
-	// Create extraction record
+	// Resolve prompt: use provided, or lookup from DB, or use builtin
+	prompt, promptID, err := e.resolveExtractionPromptV2(ctx, req)
+	if err != nil {
+		return nil, err
+	}
+
+	// Create extraction record (even with code config, we record for audit)
 	exRec := model.DialogExtraction{
 		ID:          model.GenerateID(),
 		DialogText:  req.DialogText,
 		DialogHash:  hash,
 		LLMConfigID: llmConfigID,
-		PromptID:    prompt.ID,
+		PromptID:    promptID,
 		Status:      model.ExtractionStatusProcessing,
 		CreatedAt:   time.Now(),
 	}
 	if err := e.db.WithContext(ctx).Create(&exRec).Error; err != nil {
 		return nil, fmt.Errorf("failed to create extraction record: %w", err)
-	}
-
-	var llmConfig model.LLMConfig
-	if err := e.db.WithContext(ctx).First(&llmConfig, llmConfigID).Error; err != nil {
-		return nil, fmt.Errorf("failed to load LLM config: %w", err)
 	}
 
 	memories, tokens, err := e.callOpenAI(ctx, llmConfig, prompt, req)
@@ -264,15 +268,11 @@ func (e *Extractor) Extract(ctx context.Context, req ExtractRequest) (*ExtractRe
 			// New flow: extract → find similar → decide → persist
 			summary, err := e.persistWithDecisionEngine(ctx, filtered, req)
 			if err != nil {
-				if e.logger != nil {
-					e.logger.Printf("Decision engine persist failed: %v", err)
-				}
+				logger.WarnContext(ctx, "decision engine persist failed, falling back to simple persist", "error", err)
 				// Fallback to simple persist
 				for _, mem := range filtered {
 					if err := e.persistMemory(ctx, mem); err != nil {
-						if e.logger != nil {
-							e.logger.Printf("Fallback persist failed: %v", err)
-						}
+						logger.WarnContext(ctx, "fallback persist failed", "error", err)
 					}
 				}
 			} else {
@@ -280,13 +280,15 @@ func (e *Extractor) Extract(ctx context.Context, req ExtractRequest) (*ExtractRe
 			}
 		} else {
 			// Simple persist (original behavior)
+			persisted := 0
 			for _, mem := range filtered {
 				if err := e.persistMemory(ctx, mem); err != nil {
-					if e.logger != nil {
-						e.logger.Printf("Failed to persist memory: %v", err)
-					}
+					logger.WarnContext(ctx, "failed to persist memory", "title", mem.Title, "error", err)
+				} else {
+					persisted++
 				}
 			}
+			logger.InfoContext(ctx, "memories persisted", "total", len(filtered), "succeeded", persisted)
 		}
 	}
 
@@ -447,19 +449,10 @@ func (e *Extractor) persistWithDecisionEngine(ctx context.Context, memories []Ex
 		topK = 5
 	}
 
-	// Get LLM config for decision
-	llmConfigID := req.LLMConfigID
-	if llmConfigID == "" {
-		var cfg model.LLMConfig
-		if err := e.db.WithContext(ctx).Where("is_default = ?", true).First(&cfg).Error; err != nil {
-			return nil, fmt.Errorf("no default LLM config found: %w", err)
-		}
-		llmConfigID = cfg.ID
-	}
-
-	var llmConfig model.LLMConfig
-	if err := e.db.WithContext(ctx).First(&llmConfig, llmConfigID).Error; err != nil {
-		return nil, fmt.Errorf("failed to load LLM config: %w", err)
+	// Reuse the same config resolution logic
+	llmConfig, _, err := e.resolveLLMConfig(ctx, req)
+	if err != nil {
+		return nil, err
 	}
 
 	// Initialize decision engine
@@ -470,9 +463,7 @@ func (e *Extractor) persistWithDecisionEngine(ctx context.Context, memories []Ex
 	for _, mem := range memories {
 		similar, err := decisionEngine.FindSimilarMemories(ctx, mem, topK)
 		if err != nil {
-			if e.logger != nil {
-				e.logger.Printf("Warning: failed to find similar memories for %s: %v", mem.TempID, err)
-			}
+			logger.WarnContext(ctx, "failed to find similar memories", "temp_id", mem.TempID, "error", err)
 			continue
 		}
 		allSimilarMemories[mem.TempID] = similar
@@ -525,28 +516,76 @@ func deduplicateSimilarMemories(allSimilar map[string][]SimilarMemory) []Similar
 	return dedup
 }
 
-// resolveExtractionPrompt: explicit PromptID loads from DB; empty uses is_default row if any, else in-code default (no DB).
-func (e *Extractor) resolveExtractionPrompt(ctx context.Context, explicitID string) (model.ExtractionPrompt, error) {
-	if explicitID != "" {
-		var p model.ExtractionPrompt
-		err := e.db.WithContext(ctx).First(&p, "id = ?", explicitID).Error
-		if err == nil {
-			return p, nil
+// resolveLLMConfig resolves LLM config: use provided, or lookup from DB, or fail.
+// Returns the config, the ID to record (may be empty for code-only config), and error.
+func (e *Extractor) resolveLLMConfig(ctx context.Context, req ExtractRequest) (model.LLMConfig, string, error) {
+	// Priority 1: Direct code config
+	if req.LLMConfig != nil {
+		cfg := *req.LLMConfig
+		// Ensure ID is set for recording
+		if cfg.ID == "" {
+			cfg.ID = "code-config-" + model.GenerateID()[:8]
 		}
-		if errors.Is(err, gorm.ErrRecordNotFound) && explicitID == DefaultExtractionPromptID {
-			return BuiltinExtractionPrompt(), nil
-		}
-		return model.ExtractionPrompt{}, fmt.Errorf("load extraction prompt %q: %w", explicitID, err)
+		return cfg, cfg.ID, nil
 	}
+
+	// Priority 2: Lookup by ID
+	if req.LLMConfigID != "" {
+		var cfg model.LLMConfig
+		if err := e.db.WithContext(ctx).First(&cfg, req.LLMConfigID).Error; err != nil {
+			return model.LLMConfig{}, "", fmt.Errorf("load LLM config %q: %w", req.LLMConfigID, err)
+		}
+		return cfg, cfg.ID, nil
+	}
+
+	// Priority 3: Lookup default from DB
+	var cfg model.LLMConfig
+	if err := e.db.WithContext(ctx).Where("is_default = ?", true).First(&cfg).Error; err != nil {
+		return model.LLMConfig{}, "", fmt.Errorf("no LLM config provided and no default found in DB: %w", err)
+	}
+	return cfg, cfg.ID, nil
+}
+
+// resolveExtractionPromptV2 resolves prompt: use provided, or lookup from DB, or use builtin.
+// Returns the prompt, the ID to record, and error.
+func (e *Extractor) resolveExtractionPromptV2(ctx context.Context, req ExtractRequest) (model.ExtractionPrompt, string, error) {
+	// Priority 1: Direct code config
+	if req.ExtractionPrompt != nil {
+		p := *req.ExtractionPrompt
+		if p.ID == "" {
+			p.ID = DefaultExtractionPromptID + "-code"
+		}
+		return p, p.ID, nil
+	}
+
+	// Priority 2: Lookup by ID
+	if req.PromptID != "" {
+		var p model.ExtractionPrompt
+		err := e.db.WithContext(ctx).First(&p, "id = ?", req.PromptID).Error
+		if err == nil {
+			return p, p.ID, nil
+		}
+		if errors.Is(err, gorm.ErrRecordNotFound) && req.PromptID == DefaultExtractionPromptID {
+			// Explicitly asking for builtin, use it
+			builtin := BuiltinExtractionPrompt()
+			return builtin, builtin.ID, nil
+		}
+		return model.ExtractionPrompt{}, "", fmt.Errorf("load extraction prompt %q: %w", req.PromptID, err)
+	}
+
+	// Priority 3: Lookup default from DB
 	var p model.ExtractionPrompt
 	err := e.db.WithContext(ctx).Where("is_default = ?", true).First(&p).Error
 	if err == nil {
-		return p, nil
+		return p, p.ID, nil
 	}
 	if !errors.Is(err, gorm.ErrRecordNotFound) {
-		return model.ExtractionPrompt{}, err
+		return model.ExtractionPrompt{}, "", err
 	}
-	return BuiltinExtractionPrompt(), nil
+
+	// Priority 4: Use builtin default
+	builtin := BuiltinExtractionPrompt()
+	return builtin, builtin.ID, nil
 }
 
 // Helper functions

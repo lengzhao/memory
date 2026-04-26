@@ -23,7 +23,6 @@ func main() {
 	}
 	defer memory.Close(db)
 
-	memory.Migrate(db)
 	svc := memory.NewMemoryService(db)
 
 	fmt.Println("=== 重复检测示例 ===")

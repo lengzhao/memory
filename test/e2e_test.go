@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/lengzhao/memory"
+	"github.com/lengzhao/memory/store"
 	"gorm.io/gorm"
 )
 
@@ -30,7 +31,7 @@ func setupTestDB(t *testing.T) *TestDB {
 		t.Fatalf("Failed to init database: %v", err)
 	}
 
-	if err := memory.Migrate(db); err != nil {
+	if err := store.Migrate(db); err != nil {
 		t.Fatalf("Failed to migrate database: %v", err)
 	}
 

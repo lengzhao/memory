@@ -9,34 +9,28 @@ import (
 
 // installFTS5 creates the fts_memory virtual table, sync triggers, and backfills from memory_items.
 // Safe to call repeatedly; uses IF NOT EXISTS and idempotent backfill.
+// Uses unicode61 with pre-tokenized text for CJK support.
 func installFTS5(db *gorm.DB) error {
 	statements := []string{
+		// Use unicode61 with space-separated pre-tokenized content.
+		// Content is pre-tokenized by jiebago before insertion.
 		`CREATE VIRTUAL TABLE IF NOT EXISTS fts_memory USING fts5(
-			title,
-			content,
-			summary,
-			tags_text,
+			tokenized_content,
 			item_id UNINDEXED,
-			tokenize='porter unicode61'
+			tokenize='unicode61 remove_diacritics 1'
 		)`,
 		`CREATE TRIGGER IF NOT EXISTS trg_fts_insert AFTER INSERT ON memory_items
 BEGIN
-	INSERT INTO fts_memory (item_id, title, content, summary, tags_text)
+	INSERT INTO fts_memory (item_id, tokenized_content)
 	VALUES (
 		NEW.id,
-		COALESCE(NEW.title, ''),
-		NEW.content,
-		COALESCE(NEW.summary, ''),
-		COALESCE(NEW.tags_json, '')
+		COALESCE(NEW.tokenized_text, '')
 	);
 END`,
 		`CREATE TRIGGER IF NOT EXISTS trg_fts_update AFTER UPDATE ON memory_items
 BEGIN
 	UPDATE fts_memory SET
-		title = COALESCE(NEW.title, ''),
-		content = NEW.content,
-		summary = COALESCE(NEW.summary, ''),
-		tags_text = COALESCE(NEW.tags_json, '')
+		tokenized_content = COALESCE(NEW.tokenized_text, '')
 	WHERE item_id = NEW.id;
 END`,
 		`CREATE TRIGGER IF NOT EXISTS trg_fts_delete AFTER DELETE ON memory_items
@@ -51,16 +45,5 @@ END`,
 		}
 	}
 
-	// Index existing rows (e.g. first run on DB that only had GORM tables)
-	return db.Exec(`
-		INSERT INTO fts_memory (item_id, title, content, summary, tags_text)
-		SELECT
-			m.id,
-			COALESCE(m.title, ''),
-			m.content,
-			COALESCE(m.summary, ''),
-			COALESCE(m.tags_json, '')
-		FROM memory_items m
-		WHERE NOT EXISTS (SELECT 1 FROM fts_memory f WHERE f.item_id = m.id)
-	`).Error
+	return nil
 }

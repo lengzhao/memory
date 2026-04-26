@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"gorm.io/gorm"
@@ -42,7 +43,7 @@ func (s *MemoryService) WithConfig(config Config) *MemoryService {
 
 // RememberRequest represents a request to store a memory.
 type RememberRequest struct {
-	Namespace       string
+	Namespace     string
 	NamespaceType model.NamespaceType
 	Title         string
 	Content       string
@@ -79,8 +80,9 @@ func (s *MemoryService) Remember(ctx context.Context, req RememberRequest) (stri
 		expiresAt = &t
 	}
 
-	// Create new item
+	// Create new item with tokenized text for search
 	tagsJSON, _ := json.Marshal(req.Tags)
+	textToTokenize := req.Title + " " + req.Content + " " + req.Summary
 	item := model.MemoryItem{
 		ID:            model.GenerateID(),
 		Namespace:     req.Namespace,
@@ -89,6 +91,7 @@ func (s *MemoryService) Remember(ctx context.Context, req RememberRequest) (stri
 		Content:       req.Content,
 		Summary:       req.Summary,
 		TagsJSON:      string(tagsJSON),
+		TokenizedText: TokenizeForSearch(textToTokenize),
 		SourceType:    req.SourceType,
 		SourceRef:     req.SourceRef,
 		Importance:    req.Importance,
@@ -115,29 +118,29 @@ func (s *MemoryService) Remember(ctx context.Context, req RememberRequest) (stri
 
 // RecallRequest represents a request to recall memories.
 type RecallRequest struct {
-	Query            string
-	Namespaces       []string
-	NamespaceTypes   []model.NamespaceType
-	TagsAny          []string
-	TagsAll          []string
-	TimeRangeStart   *time.Time
-	TimeRangeEnd     *time.Time
-	IncludeExpired   bool
-	MinConfidence    float64
-	MinImportance    int
-	TopK             int
-	ExcludeItemIDs   []string
+	Query          string
+	Namespaces     []string
+	NamespaceTypes []model.NamespaceType
+	TagsAny        []string
+	TagsAll        []string
+	TimeRangeStart *time.Time
+	TimeRangeEnd   *time.Time
+	IncludeExpired bool
+	MinConfidence  float64
+	MinImportance  int
+	TopK           int
+	ExcludeItemIDs []string
 }
 
 // MemoryHit represents a recalled memory with relevance info.
 type MemoryHit struct {
 	model.MemoryItem
-	Score          float64
-	FTSScore       float64
-	RecencyScore   float64
+	Score           float64
+	FTSScore        float64
+	RecencyScore    float64
 	ImportanceScore float64
 	ConfidenceScore float64
-	MatchReasons   []string
+	MatchReasons    []string
 }
 
 // Recall searches for memories using FTS and filtering.
@@ -200,28 +203,25 @@ func (s *MemoryService) Recall(ctx context.Context, req RecallRequest) ([]Memory
 		query = query.Where("id NOT IN ?", req.ExcludeItemIDs)
 	}
 
-	// FTS search if query provided
+	// Text search if query provided
 	var itemIDs []string
+	var useLike bool
 	if req.Query != "" {
-		// Use FTS5 for text search
-		var ftsResults []struct {
-			ItemID string
+		itemIDs, useLike = s.searchText(ctx, req.Query, req.TopK*3)
+		if useLike {
+			// CJK fallback: use LIKE for Chinese/Japanese/Korean queries
+			pattern := "%" + req.Query + "%"
+			query = query.Where(
+				"title LIKE ? OR content LIKE ? OR summary LIKE ?",
+				pattern, pattern, pattern,
+			)
+		} else {
+			// FTS results
+			if len(itemIDs) == 0 {
+				return []MemoryHit{}, nil
+			}
+			query = query.Where("id IN ?", itemIDs)
 		}
-		err := s.db.WithContext(ctx).Raw(`
-			SELECT item_id FROM fts_memory 
-			WHERE fts_memory MATCH ? 
-			LIMIT ?
-		`, req.Query, req.TopK*3).Scan(&ftsResults).Error
-		if err != nil {
-			return nil, wrapErr(CodeInternal, "fts search failed", err)
-		}
-		for _, r := range ftsResults {
-			itemIDs = append(itemIDs, r.ItemID)
-		}
-		if len(itemIDs) == 0 {
-			return []MemoryHit{}, nil
-		}
-		query = query.Where("id IN ?", itemIDs)
 	}
 
 	// Confidence and importance filters
@@ -245,6 +245,13 @@ func (s *MemoryService) Recall(ctx context.Context, req RecallRequest) ([]Memory
 	}
 
 	// Update access stats (async is fine, don't block return)
+	// For LIKE fallback, extract IDs from hits
+	if len(itemIDs) == 0 && len(hits) > 0 {
+		itemIDs = make([]string, len(hits))
+		for i, h := range hits {
+			itemIDs[i] = h.ID
+		}
+	}
 	go s.updateAccessStats(itemIDs)
 
 	return hits, nil
@@ -314,6 +321,61 @@ func min(a, b float64) float64 {
 	return b
 }
 
+// searchText performs text search using pre-tokenized FTS5 index.
+// The query is tokenized using jiebago for CJK support.
+func (s *MemoryService) searchText(ctx context.Context, query string, limit int) ([]string, bool) {
+	// Tokenize the query (handles both CJK and English)
+	tokenizedQuery := TokenizeQuery(query)
+	if tokenizedQuery == "" {
+		// No valid tokens, try LIKE fallback
+		return nil, true
+	}
+
+	itemIDs := s.searchFTS(ctx, tokenizedQuery, limit)
+	if len(itemIDs) == 0 {
+		// FTS found nothing, try LIKE fallback
+		return nil, true
+	}
+	return itemIDs, false
+}
+
+// searchFTS performs FTS5 search on pre-tokenized content.
+// Uses OR query to match any token (e.g., "清华 OR 大学" matches "北京 清华大学")
+func (s *MemoryService) searchFTS(ctx context.Context, tokenizedQuery string, limit int) []string {
+	// Build OR query from space-separated tokens
+	tokens := strings.Fields(tokenizedQuery)
+	if len(tokens) == 0 {
+		return nil
+	}
+
+	// Create OR query: "token1 OR token2 OR token3"
+	var orQuery strings.Builder
+	for i, token := range tokens {
+		if i > 0 {
+			orQuery.WriteString(" OR ")
+		}
+		orQuery.WriteString("\"" + token + "\"")
+	}
+
+	var results []struct {
+		ItemID string
+	}
+	err := s.db.WithContext(ctx).Raw(`
+		SELECT item_id FROM fts_memory 
+		WHERE tokenized_content MATCH ? 
+		LIMIT ?
+	`, orQuery.String(), limit).Scan(&results).Error
+	if err != nil {
+		return nil
+	}
+
+	itemIDs := make([]string, len(results))
+	for i, r := range results {
+		itemIDs[i] = r.ItemID
+	}
+	return itemIDs
+}
+
 // updateAccessStats updates access count and last_access_at for items.
 func (s *MemoryService) updateAccessStats(itemIDs []string) {
 	if len(itemIDs) == 0 {
@@ -330,11 +392,11 @@ func (s *MemoryService) updateAccessStats(itemIDs []string) {
 
 // ForgetRequest represents a request to forget memories.
 type ForgetRequest struct {
-	ItemIDs        []string
-	Namespace      string
-	NamespaceType  model.NamespaceType
-	Mode           string // "soft" (default), "hard", "expire"
-	Reason         string
+	ItemIDs       []string
+	Namespace     string
+	NamespaceType model.NamespaceType
+	Mode          string // "soft" (default), "hard", "expire"
+	Reason        string
 }
 
 // Forget removes or marks memories as deleted/expired.
@@ -461,7 +523,7 @@ func (s *MemoryService) Update(ctx context.Context, req UpdateRequest) error {
 
 	// Build updates
 	updates := map[string]interface{}{
-		"version":   item.Version + 1,
+		"version":    item.Version + 1,
 		"updated_at": time.Now(),
 	}
 
@@ -483,6 +545,23 @@ func (s *MemoryService) Update(ctx context.Context, req UpdateRequest) error {
 	}
 	if req.Confidence != nil {
 		updates["confidence"] = *req.Confidence
+	}
+
+	// Re-tokenize if text fields changed
+	if req.Title != nil || req.Content != nil || req.Summary != nil {
+		title := item.Title
+		content := item.Content
+		summary := item.Summary
+		if req.Title != nil {
+			title = *req.Title
+		}
+		if req.Content != nil {
+			content = *req.Content
+		}
+		if req.Summary != nil {
+			summary = *req.Summary
+		}
+		updates["tokenized_text"] = TokenizeForSearch(title + " " + content + " " + summary)
 	}
 
 	result := s.db.WithContext(ctx).Model(&item).Updates(updates)
