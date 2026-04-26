@@ -2,13 +2,11 @@
 package service
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"math"
-	"net/http"
+	"sort"
 	"strings"
 	"time"
 
@@ -62,10 +60,9 @@ type SimilarMemory struct {
 
 // DecisionResult contains all decisions
 type DecisionResult struct {
-	Decisions    []MemoryDecision `json:"decisions"`
-	TotalTokens  int              `json:"total_tokens"`
-	CostEstimate float64          `json:"cost_estimate"`
-	ProcessingTime int            `json:"processing_time_ms"`
+	Decisions      []MemoryDecision `json:"decisions"`
+	TotalTokens    int              `json:"total_tokens"`
+	ProcessingTime int              `json:"processing_time_ms"`
 }
 
 // DecisionEngine handles intelligent memory decisions
@@ -164,14 +161,10 @@ func (de *DecisionEngine) FindSimilarMemories(ctx context.Context, candidate Ext
 		}
 	}
 
-	// Sort by similarity (already mostly sorted from BM25, but ensure order)
-	for i := 0; i < len(similar); i++ {
-		for j := i + 1; j < len(similar); j++ {
-			if similar[j].Similarity > similar[i].Similarity {
-				similar[i], similar[j] = similar[j], similar[i]
-			}
-		}
-	}
+	// Sort by similarity descending
+	sort.Slice(similar, func(i, j int) bool {
+		return similar[i].Similarity > similar[j].Similarity
+	})
 
 	// Return topK
 	if len(similar) > topK {
@@ -282,12 +275,10 @@ func (de *DecisionEngine) Decide(ctx context.Context, llmConfig model.LLMConfig,
 	}
 
 	processingTime := int(time.Since(start).Milliseconds())
-	costEstimate := float64(tokens) * 0.000005 // $0.01 per 1K tokens
 
 	return &DecisionResult{
 		Decisions:      decisions,
 		TotalTokens:    tokens,
-		CostEstimate:   costEstimate,
 		ProcessingTime: processingTime,
 	}, nil
 }
@@ -358,62 +349,14 @@ One decision per candidate, in the same order as candidates provided.`
 
 // callDecisionLLM calls LLM for decision making
 func (de *DecisionEngine) callDecisionLLM(ctx context.Context, cfg model.LLMConfig, prompt string) ([]MemoryDecision, int, error) {
-	baseURL := "https://api.openai.com/v1"
-	if cfg.BaseURL != nil && *cfg.BaseURL != "" {
-		baseURL = *cfg.BaseURL
-	}
-	url := baseURL + "/chat/completions"
-
-	reqBody := openAIRequest{
-		Model: cfg.Model,
-		Messages: []openAIMessage{
-			{Role: "system", Content: "You are a precise memory management AI. Make decisions based on semantic similarity and factual overlap."},
-			{Role: "user", Content: prompt},
-		},
-		Temperature:    0.2, // Lower temperature for more consistent decisions
-		MaxTokens:      cfg.MaxTokens,
-		ResponseFormat: &openAIResponseFormat{Type: "json_object"},
+	messages := []openAIMessage{
+		{Role: "system", Content: "You are a precise memory management AI. Make decisions based on semantic similarity and factual overlap."},
+		{Role: "user", Content: prompt},
 	}
 
-	jsonBody, err := json.Marshal(reqBody)
+	apiResp, err := callLLM(ctx, cfg, messages, 0.2)
 	if err != nil {
-		return nil, 0, fmt.Errorf("failed to marshal request: %w", err)
-	}
-
-	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewBuffer(jsonBody))
-	if err != nil {
-		return nil, 0, fmt.Errorf("failed to create request: %w", err)
-	}
-
-	req.Header.Set("Authorization", "Bearer "+cfg.APIKey)
-	req.Header.Set("Content-Type", "application/json")
-
-	httpClient := &http.Client{
-		Timeout: time.Duration(cfg.TimeoutSeconds) * time.Second,
-	}
-
-	resp, err := httpClient.Do(req)
-	if err != nil {
-		return nil, 0, fmt.Errorf("API request failed: %w", err)
-	}
-	defer resp.Body.Close()
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, 0, fmt.Errorf("failed to read response: %w", err)
-	}
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, 0, fmt.Errorf("API returned status %d: %s", resp.StatusCode, string(body))
-	}
-
-	var apiResp openAIResponse
-	if err := json.Unmarshal(body, &apiResp); err != nil {
-		return nil, 0, fmt.Errorf("failed to parse response: %w", err)
-	}
-
-	if len(apiResp.Choices) == 0 {
-		return nil, 0, fmt.Errorf("API returned no choices")
+		return nil, 0, err
 	}
 
 	content := apiResp.Choices[0].Message.Content

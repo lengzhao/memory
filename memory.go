@@ -114,6 +114,7 @@ type (
 	ServiceConfig    = service.Config
 	RememberRequest  = service.RememberRequest
 	RecallRequest    = service.RecallRequest
+	ListRequest      = service.ListRequest
 	MemoryHit        = service.MemoryHit
 	ForgetRequest    = service.ForgetRequest
 	UpdateRequest    = service.UpdateRequest
@@ -185,15 +186,6 @@ var (
 )
 
 // 下列符号在 service 包定义，根包再导出便于单 import。
-
-// DefaultExtractionSystemPrompt 为未配置 DB 时 Extract 使用的内建 system 全文。
-const DefaultExtractionSystemPrompt = service.DefaultExtractionSystemPrompt
-
-// DefaultExtractionJSONSchema 与上配套。
-const DefaultExtractionJSONSchema = service.DefaultExtractionJSONSchema
-
-// DefaultExtractionPromptID 为内建/占位提示在 dialog_extractions.prompt_id 中使用的 id（可不在表中建行）。
-const DefaultExtractionPromptID = service.DefaultExtractionPromptID
 
 // BuiltinExtractionPrompt 为内建记忆提取模板（与 service 包一致）。
 var BuiltinExtractionPrompt = service.BuiltinExtractionPrompt

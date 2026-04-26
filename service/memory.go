@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -130,6 +131,23 @@ type RecallRequest struct {
 	MinImportance  int
 	TopK           int
 	ExcludeItemIDs []string
+}
+
+// ListRequest represents a request to list memories by time.
+type ListRequest struct {
+	Namespaces     []string
+	NamespaceTypes []model.NamespaceType
+	TagsAny        []string
+	TagsAll        []string
+	TimeRangeStart *time.Time
+	TimeRangeEnd   *time.Time
+	IncludeExpired bool
+	MinConfidence  float64
+	MinImportance  int
+	TopK           int
+	Offset         int
+	ExcludeItemIDs []string
+	Order          string // "desc" (default) or "asc", based on created_at
 }
 
 // MemoryHit represents a recalled memory with relevance info.
@@ -257,6 +275,80 @@ func (s *MemoryService) Recall(ctx context.Context, req RecallRequest) ([]Memory
 	return hits, nil
 }
 
+// List returns memories ordered by created_at.
+func (s *MemoryService) List(ctx context.Context, req ListRequest) ([]model.MemoryItem, error) {
+	if req.TopK <= 0 {
+		req.TopK = 10
+	}
+	if req.MinConfidence <= 0 {
+		req.MinConfidence = 0.5
+	}
+
+	query := s.db.WithContext(ctx).Model(&model.MemoryItem{})
+	query = query.Where("status = ?", model.ItemStatusActive)
+
+	if !req.IncludeExpired {
+		query = query.Where("expires_at IS NULL OR expires_at > ?", time.Now())
+	}
+
+	if len(req.Namespaces) > 0 {
+		query = query.Where("namespace IN ?", req.Namespaces)
+	}
+	if len(req.NamespaceTypes) > 0 {
+		query = query.Where("namespace_type IN ?", req.NamespaceTypes)
+	}
+
+	if len(req.TagsAll) > 0 {
+		for _, tag := range req.TagsAll {
+			query = query.Where("tags_json LIKE ?", fmt.Sprintf("%%\"%s\"%%", tag))
+		}
+	}
+	if len(req.TagsAny) > 0 {
+		conditions := ""
+		params := []interface{}{}
+		for i, tag := range req.TagsAny {
+			if i > 0 {
+				conditions += " OR "
+			}
+			conditions += "tags_json LIKE ?"
+			params = append(params, fmt.Sprintf("%%\"%s\"%%", tag))
+		}
+		query = query.Where("("+conditions+")", params...)
+	}
+
+	if req.TimeRangeStart != nil {
+		query = query.Where("created_at >= ?", *req.TimeRangeStart)
+	}
+	if req.TimeRangeEnd != nil {
+		query = query.Where("created_at <= ?", *req.TimeRangeEnd)
+	}
+
+	if len(req.ExcludeItemIDs) > 0 {
+		query = query.Where("id NOT IN ?", req.ExcludeItemIDs)
+	}
+
+	query = query.Where("confidence >= ?", req.MinConfidence)
+	if req.MinImportance > 0 {
+		query = query.Where("importance >= ?", req.MinImportance)
+	}
+
+	orderDirection := "DESC"
+	if strings.EqualFold(req.Order, "asc") {
+		orderDirection = "ASC"
+	}
+
+	var items []model.MemoryItem
+	if err := query.
+		Order("created_at " + orderDirection).
+		Offset(req.Offset).
+		Limit(req.TopK).
+		Find(&items).Error; err != nil {
+		return nil, wrapErr(CodeInternal, "list query failed", err)
+	}
+
+	return items, nil
+}
+
 // scoreAndRank calculates relevance scores for items.
 func (s *MemoryService) scoreAndRank(items []model.MemoryItem, req RecallRequest) []MemoryHit {
 	now := time.Now()
@@ -295,14 +387,9 @@ func (s *MemoryService) scoreAndRank(items []model.MemoryItem, req RecallRequest
 	}
 
 	// Sort by score descending
-	// (Simplified - in production use sort.Slice)
-	for i := 0; i < len(hits); i++ {
-		for j := i + 1; j < len(hits); j++ {
-			if hits[j].Score > hits[i].Score {
-				hits[i], hits[j] = hits[j], hits[i]
-			}
-		}
-	}
+	sort.Slice(hits, func(i, j int) bool {
+		return hits[i].Score > hits[j].Score
+	})
 
 	return hits
 }

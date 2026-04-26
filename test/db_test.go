@@ -53,43 +53,20 @@ func TestDBMigrate_AutoMigrate(t *testing.T) {
 	}
 }
 
-// TestDBMigrate_LLMTables tests LLM-related tables exist
+// TestDBMigrate_LLMTables tests extraction-related tables exist
 func TestDBMigrate_LLMTables(t *testing.T) {
 	tdb := setupTestDB(t)
 	defer tdb.Cleanup()
 
 	ctx := testContext()
 
-	// Test LLMConfig
-	config := model.LLMConfig{
-		ID:       model.GenerateID(),
-		Name:     "test-config",
-		Provider: model.LLMProviderOpenAI,
-		Model:    "gpt-4o",
-	}
-	if err := tdb.DB.WithContext(ctx).Create(&config).Error; err != nil {
-		t.Fatalf("Failed to create LLM config: %v", err)
-	}
-
-	// Test ExtractionPrompt
-	prompt := model.ExtractionPrompt{
-		ID:           model.GenerateID(),
-		Name:         "test-prompt",
-		SystemPrompt: "You are a test",
-		JSONSchema:   "{}",
-	}
-	if err := tdb.DB.WithContext(ctx).Create(&prompt).Error; err != nil {
-		t.Fatalf("Failed to create extraction prompt: %v", err)
-	}
-
 	// Test DialogExtraction
 	extraction := model.DialogExtraction{
-		ID:          model.GenerateID(),
-		DialogText:  "Test dialog",
-		DialogHash:  "abc123",
-		LLMConfigID: config.ID,
-		PromptID:    prompt.ID,
-		Status:      model.ExtractionStatusCompleted,
+		ID:        model.GenerateID(),
+		DialogText: "Test dialog",
+		DialogHash: "abc123",
+		ConfigRef: "llm=runtime:test-config;prompt=prompt-default-v1",
+		Status:    model.ExtractionStatusCompleted,
 	}
 	if err := tdb.DB.WithContext(ctx).Create(&extraction).Error; err != nil {
 		t.Fatalf("Failed to create dialog extraction: %v", err)

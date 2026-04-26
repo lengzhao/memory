@@ -3,15 +3,12 @@ package main
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"log"
 	"os"
 	"strconv"
 	"strings"
 	"time"
-
-	"gorm.io/gorm"
 
 	"github.com/lengzhao/memory/model"
 	"github.com/lengzhao/memory/service"
@@ -31,16 +28,6 @@ func main() {
 	fmt.Println("Running migrations (AutoMigrate + FTS5)...")
 	if err := store.Migrate(db); err != nil {
 		log.Fatalf("Migration failed: %v", err)
-	}
-
-	// 默认确保库内存在 is_default 的 LLM 与系统提取 Prompt，无需手配即可跑通示例。
-	// 若自行维护配置与提示词，可设 EXTRACT_DEMO_NO_SEED=1 跳过。
-	if os.Getenv("EXTRACT_DEMO_NO_SEED") == "1" {
-		fmt.Println("\nEXTRACT_DEMO_NO_SEED=1：已跳过内置默认项写入。请保证 llm_configs / extraction_prompts 中有默认项。")
-	} else {
-		if err := ensureDefaultLLMAndPrompt(db); err != nil {
-			log.Fatalf("ensure defaults: %v", err)
-		}
 	}
 
 	extractor := service.NewExtractor(db)
@@ -67,6 +54,7 @@ func main() {
 			DialogText:    dialog,
 			MinConfidence: 0.7,
 			DryRun:        false,
+			LLMConfig:     defaultLLMConfigFromEnv(),
 			ReferenceTime: &ref,
 			TimeZone:      "Asia/Shanghai",
 			// 可选：如 "当前用户：张三。对话中「他」指同事李四。"
@@ -79,10 +67,8 @@ func main() {
 			continue
 		}
 
-		// Calculate cost locally (GPT-4o: ~$0.01 per 1K tokens)
-		costEstimate := float64(result.TotalTokens) * 0.000005
 		fmt.Printf("Status: %s (Processing time: %dms)\n", result.Status, result.ProcessingTime)
-		fmt.Printf("Tokens: %d, Cost: $%.6f\n", result.TotalTokens, costEstimate)
+		fmt.Printf("Tokens: %d\n", result.TotalTokens)
 
 		for j, mem := range result.Memories {
 			fmt.Printf("\n  Memory %d:\n", j+1)
@@ -129,57 +115,38 @@ func main() {
 	fmt.Println("\n✅ Demo completed!")
 }
 
-const defaultLLMID = "cfg-default-openai"
-
-// ensureDefaultLLMAndPrompt inserts the demo LLM row and system prompt when missing.
-// Custom deployments: set EXTRACT_DEMO_NO_SEED=1 and provide your own rows, or change IDs / DB content as needed.
-func ensureDefaultLLMAndPrompt(db *gorm.DB) error {
-	var existingCfg model.LLMConfig
-	if err := db.Where("id = ?", defaultLLMID).First(&existingCfg).Error; err == nil {
-		fmt.Println("Default LLM config already present (" + defaultLLMID + "). Skip insert.")
-	} else if !errors.Is(err, gorm.ErrRecordNotFound) {
-		return err
-	} else {
-		now := time.Now()
-		apiKey := os.Getenv("OPENAI_API_KEY")
-		if apiKey == "" {
-			fmt.Println("⚠️  OPENAI_API_KEY 未设置：提取阶段会失败，请先 export OPENAI_API_KEY=...")
-		}
-		modelName := os.Getenv("OPENAI_MODEL")
-		if modelName == "" {
-			modelName = "gpt-4o"
-		}
-		temp := 0.3
-		if s := os.Getenv("OPENAI_TEMPERATURE"); s != "" {
-			if v, e := strconv.ParseFloat(s, 64); e == nil {
-				temp = v
-			}
-		}
-		timeout := 30
-		if s := os.Getenv("OPENAI_TIMEOUT"); s != "" {
-			if v, e := strconv.Atoi(s); e == nil && v > 0 {
-				timeout = v
-			}
-		}
-		llmConfig := model.LLMConfig{
-			ID:             defaultLLMID,
-			Name:           "OpenAI " + modelName,
-			Provider:       model.LLMProviderOpenAI,
-			APIKey:         apiKey,
-			Model:          modelName,
-			MaxTokens:      4096,
-			Temperature:    temp,
-			TimeoutSeconds: timeout,
-			IsDefault:      true,
-			Enabled:        true,
-			CreatedAt:      now,
-			UpdatedAt:      now,
-		}
-		if err := db.Create(&llmConfig).Error; err != nil {
-			return err
-		}
-		fmt.Println("Created default LLM config:", defaultLLMID)
+func defaultLLMConfigFromEnv() *model.LLMConfig {
+	apiKey := os.Getenv("OPENAI_API_KEY")
+	if apiKey == "" {
+		fmt.Println("⚠️  OPENAI_API_KEY 未设置：提取阶段会失败，请先 export OPENAI_API_KEY=...")
 	}
-
-	return nil
+	modelName := os.Getenv("OPENAI_MODEL")
+	if modelName == "" {
+		modelName = "gpt-4o"
+	}
+	temp := 0.3
+	if s := os.Getenv("OPENAI_TEMPERATURE"); s != "" {
+		if v, e := strconv.ParseFloat(s, 64); e == nil {
+			temp = v
+		}
+	}
+	timeout := 30
+	if s := os.Getenv("OPENAI_TIMEOUT"); s != "" {
+		if v, e := strconv.Atoi(s); e == nil && v > 0 {
+			timeout = v
+		}
+	}
+	baseURL := os.Getenv("OPENAI_BASE_URL")
+	cfg := &model.LLMConfig{
+		Provider:       model.LLMProviderOpenAI,
+		APIKey:         apiKey,
+		Model:          modelName,
+		MaxTokens:      4096,
+		Temperature:    temp,
+		TimeoutSeconds: timeout,
+	}
+	if baseURL != "" {
+		cfg.BaseURL = &baseURL
+	}
+	return cfg
 }

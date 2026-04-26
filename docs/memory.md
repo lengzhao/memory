@@ -489,7 +489,6 @@ flowchart LR
 - `prompt_id` TEXT NOT NULL
 - `extracted_memories_json` TEXT NOT NULL（提取结果数组）
 - `total_tokens` INTEGER
-- `cost_estimate` REAL（估算成本USD）
 - `processing_time_ms` INTEGER
 - `status` TEXT（pending/processing/completed/failed）
 - `error_message` TEXT
@@ -585,12 +584,11 @@ type ExtractRequest struct {
 
 // ExtractResult 提取结果
 type ExtractResult struct {
-    ExtractionID    string
-    Status          string
-    Memories        []ExtractedMemory
-    TotalTokens     int
-    CostEstimate    float64
-    ProcessingTime  int // ms
+    ExtractionID   string
+    Status         string
+    Memories       []ExtractedMemory
+    TotalTokens    int
+    ProcessingTime int // ms
 }
 
 // ExtractedMemory 提取的单条记忆

@@ -7,7 +7,6 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -99,8 +98,8 @@ func QuickExtract(ctx context.Context, db *gorm.DB, dialogText string, llmCfg *m
 // ExtractRequest represents a dialog extraction request
 type ExtractRequest struct {
 	DialogText        string
-	LLMConfigID       string // empty = use default (from DB or fallback)
-	PromptID          string // empty = use default (from DB or builtin)
+	LLMConfigID       string // deprecated: database lookup is no longer supported
+	PromptID          string // deprecated: database lookup is no longer supported
 	ContextMemories   []string
 	MinConfidence     float64 // default 0.7
 	DryRun            bool
@@ -117,12 +116,11 @@ type ExtractRequest struct {
 	// participants, etc. The model is instructed to replace vague references in stored title/content/summary.
 	ResolutionContext string
 
-	// LLMConfig allows passing config directly (no DB needed).
-	// If set, overrides LLMConfigID and skips DB lookup.
+	// LLMConfig must be provided directly in code.
 	LLMConfig *model.LLMConfig
 
-	// ExtractionPrompt allows passing prompt directly (no DB needed).
-	// If set, overrides PromptID and skips DB lookup.
+	// ExtractionPrompt allows passing prompt directly in code.
+	// If nil, builtin default prompt is used.
 	ExtractionPrompt *model.ExtractionPrompt
 }
 
@@ -146,7 +144,6 @@ type ExtractResult struct {
 	Status         string
 	Memories       []ExtractedMemory
 	TotalTokens    int
-	CostEstimate   float64
 	ProcessingTime int // ms
 
 	// Decision engine results (when UseDecisionEngine is true)
@@ -186,7 +183,6 @@ func (e *Extractor) Extract(ctx context.Context, req ExtractRequest) (*ExtractRe
 			Status:         "cached",
 			Memories:       memories,
 			TotalTokens:    valueOrZero(existing.TotalTokens),
-			CostEstimate:   valueOrZeroF(existing.CostEstimate),
 			ProcessingTime: valueOrZero(existing.ProcessingTimeMs),
 		}, nil
 	}
@@ -197,8 +193,8 @@ func (e *Extractor) Extract(ctx context.Context, req ExtractRequest) (*ExtractRe
 		return nil, err
 	}
 
-	// Resolve prompt: use provided, or lookup from DB, or use builtin
-	prompt, promptID, err := e.resolveExtractionPromptV2(ctx, req)
+	// Resolve prompt from request or builtin default
+	prompt, promptID, err := e.resolveExtractionPromptV2(req)
 	if err != nil {
 		return nil, err
 	}
@@ -208,8 +204,7 @@ func (e *Extractor) Extract(ctx context.Context, req ExtractRequest) (*ExtractRe
 		ID:          model.GenerateID(),
 		DialogText:  req.DialogText,
 		DialogHash:  hash,
-		LLMConfigID: llmConfigID,
-		PromptID:    promptID,
+		ConfigRef:   fmt.Sprintf("llm=%s;prompt=%s", llmConfigID, promptID),
 		Status:      model.ExtractionStatusProcessing,
 		CreatedAt:   time.Now(),
 	}
@@ -246,13 +241,10 @@ func (e *Extractor) Extract(ctx context.Context, req ExtractRequest) (*ExtractRe
 	// Calculate metrics using actual tokens from API
 	processingTime := int(time.Since(start).Milliseconds())
 	totalTokens := tokens
-	// Note: Cost calculation removed from core library.
-	// Callers can calculate cost using TotalTokens and their provider's pricing.
 
 	now := time.Now()
 	exRec.ExtractedMemoriesJSON = string(memoriesJSON)
 	exRec.TotalTokens = &totalTokens
-	exRec.CostEstimate = nil // Caller calculates if needed
 	exRec.ProcessingTimeMs = &processingTime
 	exRec.Status = model.ExtractionStatusCompleted
 	exRec.CompletedAt = &now
@@ -302,40 +294,33 @@ func (e *Extractor) Extract(ctx context.Context, req ExtractRequest) (*ExtractRe
 	}, nil
 }
 
-// callOpenAI calls the OpenAI API to extract memories from dialog
-// Returns extracted memories, total token count, and error if any
-func (e *Extractor) callOpenAI(ctx context.Context, cfg model.LLMConfig, prompt model.ExtractionPrompt, req ExtractRequest) ([]ExtractedMemory, int, error) {
-	// Build API URL
+// callLLM calls the OpenAI-compatible API and returns the raw response.
+// This is the generic HTTP wrapper used by both extraction and decision engines.
+func callLLM(ctx context.Context, cfg model.LLMConfig, messages []openAIMessage, temperature float64) (*openAIResponse, error) {
 	baseURL := "https://api.openai.com/v1"
 	if cfg.BaseURL != nil && *cfg.BaseURL != "" {
 		baseURL = *cfg.BaseURL
 	}
 	url := baseURL + "/chat/completions"
 
-	userPrompt := buildExtractionUserPrompt(req)
-	// System prompt 以数据库或本包内建 DefaultExtractionSystemPrompt 为准
 	reqBody := openAIRequest{
-		Model: cfg.Model,
-		Messages: []openAIMessage{
-			{Role: "system", Content: prompt.SystemPrompt},
-			{Role: "user", Content: userPrompt},
-		},
-		Temperature:    cfg.Temperature,
+		Model:          cfg.Model,
+		Messages:       messages,
+		Temperature:    temperature,
 		MaxTokens:      cfg.MaxTokens,
 		ResponseFormat: &openAIResponseFormat{Type: "json_object"},
 	}
 
 	jsonBody, err := json.Marshal(reqBody)
 	if err != nil {
-		return nil, 0, fmt.Errorf("failed to marshal request: %w", err)
+		return nil, fmt.Errorf("failed to marshal request: %w", err)
 	}
 
 	httpReq, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewBuffer(jsonBody))
 	if err != nil {
-		return nil, 0, fmt.Errorf("failed to create request: %w", err)
+		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
 
-	// Note: API key is used as-is. Caller is responsible for decryption if needed.
 	apiKey := cfg.APIKey
 	httpReq.Header.Set("Authorization", "Bearer "+apiKey)
 	httpReq.Header.Set("Content-Type", "application/json")
@@ -346,42 +331,53 @@ func (e *Extractor) callOpenAI(ctx context.Context, cfg model.LLMConfig, prompt 
 
 	resp, err := httpClient.Do(httpReq)
 	if err != nil {
-		return nil, 0, fmt.Errorf("API request failed: %w", err)
+		return nil, fmt.Errorf("API request failed: %w", err)
 	}
 	defer resp.Body.Close()
 
-	// Read response body
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return nil, 0, fmt.Errorf("failed to read response: %w", err)
+		return nil, fmt.Errorf("failed to read response: %w", err)
 	}
 
-	// Check HTTP status
 	if resp.StatusCode != http.StatusOK {
 		var apiErr openAIResponse
 		if err := json.Unmarshal(body, &apiErr); err == nil && apiErr.Error != nil {
-			return nil, 0, apiErr.Error
+			return nil, apiErr.Error
 		}
-		return nil, 0, fmt.Errorf("API returned status %d: %s", resp.StatusCode, string(body))
+		return nil, fmt.Errorf("API returned status %d: %s", resp.StatusCode, string(body))
 	}
 
-	// Parse response
 	var apiResp openAIResponse
 	if err := json.Unmarshal(body, &apiResp); err != nil {
-		return nil, 0, fmt.Errorf("failed to parse response: %w", err)
+		return nil, fmt.Errorf("failed to parse response: %w", err)
 	}
 
-	// Check API error
 	if apiResp.Error != nil {
-		return nil, 0, apiResp.Error
+		return nil, apiResp.Error
 	}
 
-	// Check if we have choices
 	if len(apiResp.Choices) == 0 {
-		return nil, 0, fmt.Errorf("API returned no choices")
+		return nil, fmt.Errorf("API returned no choices")
 	}
 
-	// Extract content from response
+	return &apiResp, nil
+}
+
+// callOpenAI calls the OpenAI API to extract memories from dialog
+// Returns extracted memories, total token count, and error if any
+func (e *Extractor) callOpenAI(ctx context.Context, cfg model.LLMConfig, prompt model.ExtractionPrompt, req ExtractRequest) ([]ExtractedMemory, int, error) {
+	userPrompt := buildExtractionUserPrompt(req)
+	messages := []openAIMessage{
+		{Role: "system", Content: prompt.SystemPrompt},
+		{Role: "user", Content: userPrompt},
+	}
+
+	apiResp, err := callLLM(ctx, cfg, messages, cfg.Temperature)
+	if err != nil {
+		return nil, 0, err
+	}
+
 	content := apiResp.Choices[0].Message.Content
 
 	// The response should be a JSON object with a "memories" key or directly an array
@@ -516,74 +512,51 @@ func deduplicateSimilarMemories(allSimilar map[string][]SimilarMemory) []Similar
 	return dedup
 }
 
-// resolveLLMConfig resolves LLM config: use provided, or lookup from DB, or fail.
-// Returns the config, the ID to record (may be empty for code-only config), and error.
+// resolveLLMConfig resolves runtime LLM config from request.
+// Returns the config, a recordable ID, and error.
 func (e *Extractor) resolveLLMConfig(ctx context.Context, req ExtractRequest) (model.LLMConfig, string, error) {
-	// Priority 1: Direct code config
 	if req.LLMConfig != nil {
 		cfg := *req.LLMConfig
-		// Ensure ID is set for recording
-		if cfg.ID == "" {
-			cfg.ID = "code-config-" + model.GenerateID()[:8]
+		if cfg.Provider == "" || cfg.Model == "" || cfg.APIKey == "" {
+			return model.LLMConfig{}, "", fmt.Errorf("invalid LLM config: provider/model/api_key are required")
 		}
-		return cfg, cfg.ID, nil
+		if cfg.MaxTokens <= 0 {
+			cfg.MaxTokens = 4096
+		}
+		if cfg.Temperature == 0 {
+			cfg.Temperature = 0.3
+		}
+		if cfg.TimeoutSeconds <= 0 {
+			cfg.TimeoutSeconds = 30
+		}
+		return cfg, fmt.Sprintf("runtime:%s:%s", cfg.Provider, cfg.Model), nil
 	}
 
-	// Priority 2: Lookup by ID
 	if req.LLMConfigID != "" {
-		var cfg model.LLMConfig
-		if err := e.db.WithContext(ctx).First(&cfg, req.LLMConfigID).Error; err != nil {
-			return model.LLMConfig{}, "", fmt.Errorf("load LLM config %q: %w", req.LLMConfigID, err)
-		}
-		return cfg, cfg.ID, nil
+		return model.LLMConfig{}, "", fmt.Errorf("LLMConfigID is deprecated; pass ExtractRequest.LLMConfig directly")
 	}
 
-	// Priority 3: Lookup default from DB
-	var cfg model.LLMConfig
-	if err := e.db.WithContext(ctx).Where("is_default = ?", true).First(&cfg).Error; err != nil {
-		return model.LLMConfig{}, "", fmt.Errorf("no LLM config provided and no default found in DB: %w", err)
-	}
-	return cfg, cfg.ID, nil
+	return model.LLMConfig{}, "", fmt.Errorf("missing LLM config: pass ExtractRequest.LLMConfig")
 }
 
-// resolveExtractionPromptV2 resolves prompt: use provided, or lookup from DB, or use builtin.
+// resolveExtractionPromptV2 resolves prompt from request or builtin default.
 // Returns the prompt, the ID to record, and error.
-func (e *Extractor) resolveExtractionPromptV2(ctx context.Context, req ExtractRequest) (model.ExtractionPrompt, string, error) {
-	// Priority 1: Direct code config
+func (e *Extractor) resolveExtractionPromptV2(req ExtractRequest) (model.ExtractionPrompt, string, error) {
 	if req.ExtractionPrompt != nil {
 		p := *req.ExtractionPrompt
 		if p.ID == "" {
-			p.ID = DefaultExtractionPromptID + "-code"
+			p.ID = "prompt-default-v1-code"
+		}
+		if strings.TrimSpace(p.SystemPrompt) == "" {
+			return model.ExtractionPrompt{}, "", fmt.Errorf("invalid ExtractionPrompt: system prompt is required")
 		}
 		return p, p.ID, nil
 	}
 
-	// Priority 2: Lookup by ID
 	if req.PromptID != "" {
-		var p model.ExtractionPrompt
-		err := e.db.WithContext(ctx).First(&p, "id = ?", req.PromptID).Error
-		if err == nil {
-			return p, p.ID, nil
-		}
-		if errors.Is(err, gorm.ErrRecordNotFound) && req.PromptID == DefaultExtractionPromptID {
-			// Explicitly asking for builtin, use it
-			builtin := BuiltinExtractionPrompt()
-			return builtin, builtin.ID, nil
-		}
-		return model.ExtractionPrompt{}, "", fmt.Errorf("load extraction prompt %q: %w", req.PromptID, err)
+		return model.ExtractionPrompt{}, "", fmt.Errorf("PromptID is deprecated; pass ExtractRequest.ExtractionPrompt directly")
 	}
 
-	// Priority 3: Lookup default from DB
-	var p model.ExtractionPrompt
-	err := e.db.WithContext(ctx).Where("is_default = ?", true).First(&p).Error
-	if err == nil {
-		return p, p.ID, nil
-	}
-	if !errors.Is(err, gorm.ErrRecordNotFound) {
-		return model.ExtractionPrompt{}, "", err
-	}
-
-	// Priority 4: Use builtin default
 	builtin := BuiltinExtractionPrompt()
 	return builtin, builtin.ID, nil
 }
@@ -668,9 +641,3 @@ func valueOrZero(ptr *int) int {
 	return *ptr
 }
 
-func valueOrZeroF(ptr *float64) float64 {
-	if ptr == nil {
-		return 0
-	}
-	return *ptr
-}

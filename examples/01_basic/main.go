@@ -26,6 +26,7 @@ func main() {
 	// 1. 初始化数据库 (DefaultConfig 已启用 AutoMigrate)
 	fmt.Println("=== 1. 初始化数据库 ===")
 	cfg := memory.DefaultConfig()
+	// 内存数据库：cfg.Path = ":memory:"
 	cfg.Path = "example.db" // 文件数据库，方便查看
 
 	db, err := memory.InitDB(cfg)
@@ -88,6 +89,20 @@ func main() {
 		log.Fatal(err)
 	}
 	fmt.Printf("存储临时上下文，ID: %s (30秒后过期)\n", contextID)
+
+	// 5.1 按时间列出最近记录（created_at DESC）
+	fmt.Println("\n=== 4.1 列出最近20条记录（按时间倒序） ===")
+	recentItems, err := svc.List(ctx, memory.ListRequest{
+		TopK:  20,
+		Order: "desc",
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+	fmt.Printf("最近记录共 %d 条:\n", len(recentItems))
+	for _, item := range recentItems {
+		fmt.Printf("  - [%s] %s (%s)\n", item.Namespace, item.Title, item.CreatedAt.Format(time.RFC3339))
+	}
 
 	// 6. 回忆记忆 - 按namespace查询
 	fmt.Println("\n=== 5. 回忆用户偏好 ===")

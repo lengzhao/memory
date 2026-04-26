@@ -46,8 +46,6 @@ func main() {
 	// 配置LLM（代码直接配置，无需存储到DB）
 	// 这是新的简化方式：配置通过 ExtractRequest 直接传递
 	llmConfig := &model.LLMConfig{
-		ID:       "code-config-" + memory.GenerateID()[:8],
-		Name:     "OpenAI GPT-4o",
 		Provider: model.LLMProviderOpenAI,
 		APIKey:   apiKey,
 		Model:    getEnv("OPENAI_MODEL", "gpt-4o"),

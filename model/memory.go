@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"github.com/oklog/ulid/v2"
-	"gorm.io/gorm"
 )
 
 // NamespaceType defines the type of namespace
@@ -247,60 +246,24 @@ const (
 	ExtractionStatusFailed     ExtractionStatus = "failed"
 )
 
-// LLMConfig stores LLM provider configuration.
-// IMPORTANT: APIKey is stored as-is (plaintext). Encryption must be handled by the caller
-// before storing or after retrieving. This library does NOT manage key encryption.
+// LLMConfig stores runtime LLM provider configuration.
+// This config is passed in code and is NOT persisted by this library.
 type LLMConfig struct {
-	ID             string      `gorm:"column:id;type:text;primaryKey"`
-	Name           string      `gorm:"column:name;type:text;not null"`
-	Provider       LLMProvider `gorm:"column:provider;type:text;not null;index:idx_llm_provider"`
-	APIKey         string      `gorm:"column:api_key;type:text"` // Plaintext - caller handles encryption/decryption
-	BaseURL        *string     `gorm:"column:base_url;type:text"`
-	Model          string      `gorm:"column:model;type:text;not null"`
-	MaxTokens      int         `gorm:"column:max_tokens;type:integer;default:4096"`
-	Temperature    float64     `gorm:"column:temperature;type:real;default:0.3"`
-	TimeoutSeconds int         `gorm:"column:timeout_seconds;type:integer;default:30"`
-	IsDefault      bool        `gorm:"column:is_default;type:boolean;default:0;uniqueIndex:idx_llm_default"`
-	Enabled        bool        `gorm:"column:enabled;type:boolean;default:1"`
-	CreatedAt      time.Time   `gorm:"column:created_at;type:datetime;not null"`
-	UpdatedAt      time.Time   `gorm:"column:updated_at;type:datetime;not null"`
+	Provider       LLMProvider
+	APIKey         string // Plaintext - caller handles encryption/decryption if needed
+	BaseURL        *string
+	Model          string
+	MaxTokens      int
+	Temperature    float64
+	TimeoutSeconds int
 }
 
-// TableName specifies the table name for LLMConfig
-func (LLMConfig) TableName() string {
-	return "llm_configs"
-}
-
-// BeforeCreate hook to ensure only one default config
-// Note: Application layer should handle the actual logic of unsetting other defaults
-func (c *LLMConfig) BeforeCreate(tx *gorm.DB) error {
-	if c.ID == "" {
-		c.ID = GenerateID()
-	}
-	if c.CreatedAt.IsZero() {
-		c.CreatedAt = time.Now()
-	}
-	if c.UpdatedAt.IsZero() {
-		c.UpdatedAt = time.Now()
-	}
-	return nil
-}
-
-// ExtractionPrompt stores prompt templates for memory extraction
+// ExtractionPrompt stores runtime prompt configuration for memory extraction.
+// This config is passed in code and is NOT persisted by this library.
 type ExtractionPrompt struct {
-	ID           string    `gorm:"column:id;type:text;primaryKey"`
-	Name         string    `gorm:"column:name;type:text;not null;uniqueIndex"`
-	Version      int       `gorm:"column:version;type:integer;default:1"`
-	SystemPrompt string    `gorm:"column:system_prompt;type:text;not null"`
-	JSONSchema   string    `gorm:"column:json_schema;type:text;not null"`
-	IsDefault    bool      `gorm:"column:is_default;type:boolean;default:0;uniqueIndex:idx_prompt_default"`
-	CreatedAt    time.Time `gorm:"column:created_at;type:datetime;not null"`
-	UpdatedAt    time.Time `gorm:"column:updated_at;type:datetime;not null"`
-}
-
-// TableName specifies the table name for ExtractionPrompt
-func (ExtractionPrompt) TableName() string {
-	return "extraction_prompts"
+	ID           string
+	SystemPrompt string
+	JSONSchema   string
 }
 
 // DialogExtraction records the extraction process and results
@@ -308,11 +271,9 @@ type DialogExtraction struct {
 	ID                    string           `gorm:"column:id;type:text;primaryKey"`
 	DialogText            string           `gorm:"column:dialog_text;type:text;not null"`
 	DialogHash            string           `gorm:"column:dialog_hash;type:text;not null;uniqueIndex:idx_dialog_hash"` // SHA256 for idempotency
-	LLMConfigID           string           `gorm:"column:llm_config_id;type:text;not null;index:idx_ext_llm"`
-	PromptID              string           `gorm:"column:prompt_id;type:text;not null"`
+	ConfigRef             string           `gorm:"column:config_ref;type:text"`
 	ExtractedMemoriesJSON string           `gorm:"column:extracted_memories_json;type:text"` // Array of ExtractedMemory
 	TotalTokens           *int             `gorm:"column:total_tokens;type:integer"`
-	CostEstimate          *float64         `gorm:"column:cost_estimate;type:real"`
 	ProcessingTimeMs      *int             `gorm:"column:processing_time_ms;type:integer"`
 	Status                ExtractionStatus `gorm:"column:status;type:text;not null;index:idx_ext_status"`
 	ErrorMessage          *string          `gorm:"column:error_message;type:text"`

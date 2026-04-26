@@ -150,6 +150,66 @@ func TestMemoryService_Recall(t *testing.T) {
 	})
 }
 
+func TestMemoryService_List(t *testing.T) {
+	db := store.SetupTestDB(t)
+	svc := NewMemoryService(db)
+	ctx := context.Background()
+
+	create := func(title string) {
+		_, err := svc.Remember(ctx, RememberRequest{
+			Namespace:     "test/list",
+			NamespaceType: model.NamespaceTypeKnowledge,
+			Title:         title,
+			Content:       "List ordering test",
+			SourceType:    model.SourceTypeUser,
+			Importance:    50,
+			Confidence:    0.9,
+		})
+		if err != nil {
+			t.Fatalf("Remember failed: %v", err)
+		}
+	}
+
+	create("first")
+	time.Sleep(5 * time.Millisecond)
+	create("second")
+	time.Sleep(5 * time.Millisecond)
+	create("third")
+
+	t.Run("default desc returns newest first", func(t *testing.T) {
+		items, err := svc.List(ctx, ListRequest{
+			Namespaces: []string{"test/list"},
+			TopK:       2,
+		})
+		if err != nil {
+			t.Fatalf("List failed: %v", err)
+		}
+		if len(items) != 2 {
+			t.Fatalf("Expected 2 items, got %d", len(items))
+		}
+		if items[0].Title != "third" || items[1].Title != "second" {
+			t.Fatalf("Unexpected order: got [%s, %s]", items[0].Title, items[1].Title)
+		}
+	})
+
+	t.Run("asc returns oldest first", func(t *testing.T) {
+		items, err := svc.List(ctx, ListRequest{
+			Namespaces: []string{"test/list"},
+			TopK:       2,
+			Order:      "asc",
+		})
+		if err != nil {
+			t.Fatalf("List failed: %v", err)
+		}
+		if len(items) != 2 {
+			t.Fatalf("Expected 2 items, got %d", len(items))
+		}
+		if items[0].Title != "first" || items[1].Title != "second" {
+			t.Fatalf("Unexpected order: got [%s, %s]", items[0].Title, items[1].Title)
+		}
+	})
+}
+
 func TestMemoryService_Update(t *testing.T) {
 	db := store.SetupTestDB(t)
 	svc := NewMemoryService(db)
