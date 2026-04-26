@@ -359,26 +359,18 @@ sequenceDiagram
 
 ---
 
-## 11. Repo 初始化建议
+## 11. Repo 布局（与实现仓库对齐）
+
+本仓库为库形态：`github.com/lengzhao/memory`。表结构以 **`model` 包 GORM 标签为唯一事实来源**；`store.Migrate` 内部执行 `AutoMigrate` 并安装 FTS5 虚表与触发器。无独立 `migrations/*.sql` 目录。
 
 ```text
-openclaw-memory-hub/
-  cmd/server/
-  internal/
-    api/
-    service/
-    store/sqlite/
-    summary/
-    expiry/
-    ranking/
-    model/
-  migrations/
-  configs/
-  tests/
+memory/
+  examples/     # 可执行示例
+  model/        # 表定义
+  service/
+  store/        # InitDB、Migrate、FTS5 安装
+  test/
   docs/
-    architecture.md
-    api.md
-    schema.md
 ```
 
 ---
@@ -386,7 +378,7 @@ openclaw-memory-hub/
 ## 12. 里程碑（建议）
 
 ### M1（1-2周）核心存储与基础API
-- SQLite schema + migration（含v0.2新增表：namespace_policies, deleted_items, events增强字段）
+- SQLite schema 由 GORM `AutoMigrate` + `store` 中 FTS5 安装（`namespace_policies`、`deleted_items`、事件表等）
 - Remember/Recall/Forget 基础功能（含dedupe_key幂等、request_id幂等窗口）
 - FTS5 检索 + namespace 过滤 + trigger自动同步
 - **并发控制**：乐观锁实现（Update接口 + version字段校验）
@@ -503,7 +495,7 @@ flowchart LR
 - `error_message` TEXT
 - `created_at` DATETIME NOT NULL
 
-### 14.4 分类策略（6类Namespace）
+### 14.4 分类策略（4 类 namespace）
 
 LLM提取器需要判断每条记忆属于哪类：
 

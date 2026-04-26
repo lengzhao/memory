@@ -13,7 +13,7 @@
 
 3. 运行演示：
    ```bash
-   go run cmd/extract_demo/main.go
+   go run examples/08_extract_demo/main.go
    ```
 
 ## 配置选项
@@ -40,7 +40,7 @@ export OPENAI_API_KEY=your-azure-key
 export OPENAI_BASE_URL=https://your-resource.openai.azure.com/openai/deployments/your-deployment
 
 # 运行演示
-go run cmd/extract_demo/main.go
+go run examples/08_extract_demo/main.go
 ```
 
 ## 成本估算
@@ -126,7 +126,7 @@ export OPENAI_MODEL=llama3.1:8b
 export OPENAI_API_KEY=ollama  # Ollama 不验证 key，但需要一个值
 
 # 运行
-go run cmd/extract_demo/main.go
+go run examples/08_extract_demo/main.go
 ```
 
 注意：本地模型可能需要更多的提示词工程才能达到满意的提取效果。

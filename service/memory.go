@@ -11,7 +11,6 @@ import (
 	"gorm.io/gorm"
 
 	"github.com/lengzhao/memory/model"
-	memerrors "github.com/lengzhao/memory/pkg/errors"
 )
 
 // Config holds configuration and callbacks for MemoryService.
@@ -34,9 +33,11 @@ func NewMemoryService(db *gorm.DB) *MemoryService {
 	return &MemoryService{db: db}
 }
 
-// NewMemoryServiceWithConfig creates a new memory service with config.
-func NewMemoryServiceWithConfig(db *gorm.DB, config Config) *MemoryService {
-	return &MemoryService{db: db, config: config}
+// WithConfig sets the configuration for the memory service.
+// Returns the service for method chaining.
+func (s *MemoryService) WithConfig(config Config) *MemoryService {
+	s.config = config
+	return s
 }
 
 // RememberRequest represents a request to store a memory.
@@ -101,7 +102,7 @@ func (s *MemoryService) Remember(ctx context.Context, req RememberRequest) (stri
 	}
 
 	if err := s.db.WithContext(ctx).Create(&item).Error; err != nil {
-		return "", memerrors.Wrap(memerrors.CodeInternal, "failed to create memory", err)
+		return "", wrapErr(CodeInternal, "failed to create memory", err)
 	}
 
 	// Trigger callback
@@ -212,7 +213,7 @@ func (s *MemoryService) Recall(ctx context.Context, req RecallRequest) ([]Memory
 			LIMIT ?
 		`, req.Query, req.TopK*3).Scan(&ftsResults).Error
 		if err != nil {
-			return nil, memerrors.Wrap(memerrors.CodeInternal, "fts search failed", err)
+			return nil, wrapErr(CodeInternal, "fts search failed", err)
 		}
 		for _, r := range ftsResults {
 			itemIDs = append(itemIDs, r.ItemID)
@@ -232,7 +233,7 @@ func (s *MemoryService) Recall(ctx context.Context, req RecallRequest) ([]Memory
 	// Execute query
 	var items []model.MemoryItem
 	if err := query.Limit(req.TopK * 2).Find(&items).Error; err != nil {
-		return nil, memerrors.Wrap(memerrors.CodeInternal, "query failed", err)
+		return nil, wrapErr(CodeInternal, "query failed", err)
 	}
 
 	// Score and rank results
@@ -376,7 +377,7 @@ func (s *MemoryService) Forget(ctx context.Context, req ForgetRequest) (int, err
 		// Mark as expired
 		result := dbQuery.Update("status", model.ItemStatusExpired)
 		if result.Error != nil {
-			return 0, memerrors.Wrap(memerrors.CodeInternal, "expire failed", result.Error)
+			return 0, wrapErr(CodeInternal, "expire failed", result.Error)
 		}
 		// Trigger callbacks
 		for _, id := range itemIDs {
@@ -390,7 +391,7 @@ func (s *MemoryService) Forget(ctx context.Context, req ForgetRequest) (int, err
 		// Move to deleted_items first, then delete
 		var items []model.MemoryItem
 		if err := dbQuery.Find(&items).Error; err != nil {
-			return 0, memerrors.Wrap(memerrors.CodeInternal, "find items failed", err)
+			return 0, wrapErr(CodeInternal, "find items failed", err)
 		}
 		for _, item := range items {
 			data, _ := json.Marshal(item)
@@ -405,7 +406,7 @@ func (s *MemoryService) Forget(ctx context.Context, req ForgetRequest) (int, err
 		}
 		result := dbQuery.Delete(&model.MemoryItem{})
 		if result.Error != nil {
-			return 0, memerrors.Wrap(memerrors.CodeInternal, "hard delete failed", result.Error)
+			return 0, wrapErr(CodeInternal, "hard delete failed", result.Error)
 		}
 		// Trigger callbacks
 		for _, id := range itemIDs {
@@ -419,7 +420,7 @@ func (s *MemoryService) Forget(ctx context.Context, req ForgetRequest) (int, err
 		// Just mark status
 		result := dbQuery.Update("status", model.ItemStatusDeleted)
 		if result.Error != nil {
-			return 0, memerrors.Wrap(memerrors.CodeInternal, "soft delete failed", result.Error)
+			return 0, wrapErr(CodeInternal, "soft delete failed", result.Error)
 		}
 		// Trigger callbacks
 		for _, id := range itemIDs {
@@ -448,14 +449,14 @@ func (s *MemoryService) Update(ctx context.Context, req UpdateRequest) error {
 	var item model.MemoryItem
 	if err := s.db.WithContext(ctx).First(&item, "id = ?", req.ItemID).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return memerrors.Wrap(memerrors.CodeNotFound, "item not found", err)
+			return wrapErr(CodeNotFound, "item not found", err)
 		}
-		return memerrors.Wrap(memerrors.CodeInternal, "query failed", err)
+		return wrapErr(CodeInternal, "query failed", err)
 	}
 
 	// Optimistic locking check
 	if item.Version != req.ExpectedVersion {
-		return memerrors.Wrap(memerrors.CodeConflict, fmt.Sprintf("version conflict: expected %d, got %d", req.ExpectedVersion, item.Version), nil)
+		return wrapErr(CodeConflict, fmt.Sprintf("version conflict: expected %d, got %d", req.ExpectedVersion, item.Version), nil)
 	}
 
 	// Build updates
@@ -486,10 +487,10 @@ func (s *MemoryService) Update(ctx context.Context, req UpdateRequest) error {
 
 	result := s.db.WithContext(ctx).Model(&item).Updates(updates)
 	if result.Error != nil {
-		return memerrors.Wrap(memerrors.CodeInternal, "update failed", result.Error)
+		return wrapErr(CodeInternal, "update failed", result.Error)
 	}
 	if result.RowsAffected == 0 {
-		return memerrors.New(memerrors.CodeInternal, "update failed: no rows affected")
+		return newErr(CodeInternal, "update failed: no rows affected")
 	}
 
 	// Reload item and trigger callback
@@ -512,10 +513,10 @@ func (s *MemoryService) Touch(ctx context.Context, itemID string) error {
 		})
 
 	if result.Error != nil {
-		return memerrors.Wrap(memerrors.CodeInternal, "touch failed", result.Error)
+		return wrapErr(CodeInternal, "touch failed", result.Error)
 	}
 	if result.RowsAffected == 0 {
-		return memerrors.Wrap(memerrors.CodeNotFound, fmt.Sprintf("item not found: %s", itemID), nil)
+		return wrapErr(CodeNotFound, fmt.Sprintf("item not found: %s", itemID), nil)
 	}
 
 	return nil
@@ -531,9 +532,9 @@ func (s *MemoryService) TouchWithRenew(ctx context.Context, itemID string, thres
 	var item model.MemoryItem
 	if err := s.db.WithContext(ctx).First(&item, "id = ?", itemID).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return false, memerrors.Wrap(memerrors.CodeNotFound, "item not found", err)
+			return false, wrapErr(CodeNotFound, "item not found", err)
 		}
-		return false, memerrors.Wrap(memerrors.CodeInternal, "query failed", err)
+		return false, wrapErr(CodeInternal, "query failed", err)
 	}
 
 	// Only renew if has expiry and threshold reached
@@ -545,7 +546,7 @@ func (s *MemoryService) TouchWithRenew(ctx context.Context, itemID string, thres
 			"expires_at":     newExpiry,
 		})
 		if result.Error != nil {
-			return false, memerrors.Wrap(memerrors.CodeInternal, "renew failed", result.Error)
+			return false, wrapErr(CodeInternal, "renew failed", result.Error)
 		}
 		return true, nil
 	}
@@ -562,10 +563,10 @@ func (s *MemoryService) RenewExpiration(ctx context.Context, itemID string, ttlS
 		Update("expires_at", newExpiry)
 
 	if result.Error != nil {
-		return memerrors.Wrap(memerrors.CodeInternal, "renew expiration failed", result.Error)
+		return wrapErr(CodeInternal, "renew expiration failed", result.Error)
 	}
 	if result.RowsAffected == 0 {
-		return memerrors.Wrap(memerrors.CodeNotFound, fmt.Sprintf("item not found: %s", itemID), nil)
+		return wrapErr(CodeNotFound, fmt.Sprintf("item not found: %s", itemID), nil)
 	}
 
 	return nil
@@ -588,7 +589,7 @@ func (s *MemoryService) CleanupExpired(ctx context.Context) (int64, error) {
 		Update("status", model.ItemStatusExpired)
 
 	if result.Error != nil {
-		return 0, memerrors.Wrap(memerrors.CodeInternal, "cleanup expired failed", result.Error)
+		return 0, wrapErr(CodeInternal, "cleanup expired failed", result.Error)
 	}
 
 	// Trigger callbacks
@@ -608,7 +609,7 @@ func (s *MemoryService) PurgeDeleted(ctx context.Context, before time.Time) (int
 	if err := s.db.WithContext(ctx).
 		Where("status = ? AND updated_at < ?", model.ItemStatusDeleted, before).
 		Find(&items).Error; err != nil {
-		return 0, memerrors.Wrap(memerrors.CodeInternal, "find deleted items failed", err)
+		return 0, wrapErr(CodeInternal, "find deleted items failed", err)
 	}
 
 	if len(items) == 0 {
@@ -638,7 +639,7 @@ func (s *MemoryService) PurgeDeleted(ctx context.Context, before time.Time) (int
 		Delete(&model.MemoryItem{})
 
 	if result.Error != nil {
-		return 0, memerrors.Wrap(memerrors.CodeInternal, "purge deleted failed", result.Error)
+		return 0, wrapErr(CodeInternal, "purge deleted failed", result.Error)
 	}
 
 	return result.RowsAffected, nil
@@ -648,13 +649,13 @@ func (s *MemoryService) PurgeDeleted(ctx context.Context, before time.Time) (int
 func (s *MemoryService) RebuildFTS(ctx context.Context) error {
 	// Delete all from FTS
 	if err := s.db.WithContext(ctx).Exec("DELETE FROM fts_memory").Error; err != nil {
-		return memerrors.Wrap(memerrors.CodeInternal, "clear fts failed", err)
+		return wrapErr(CodeInternal, "clear fts failed", err)
 	}
 
 	// Re-insert all active items
 	var items []model.MemoryItem
 	if err := s.db.WithContext(ctx).Where("status = ?", model.ItemStatusActive).Find(&items).Error; err != nil {
-		return memerrors.Wrap(memerrors.CodeInternal, "fetch items failed", err)
+		return wrapErr(CodeInternal, "fetch items failed", err)
 	}
 
 	for _, item := range items {

@@ -9,7 +9,6 @@ import (
 	"gorm.io/gorm"
 
 	"github.com/lengzhao/memory/model"
-	memerrors "github.com/lengzhao/memory/pkg/errors"
 )
 
 // SummaryGenerator handles summary generation for items and namespaces.
@@ -28,9 +27,9 @@ func (g *SummaryGenerator) GenerateItemSummary(ctx context.Context, itemID strin
 	var item model.MemoryItem
 	if err := g.db.WithContext(ctx).First(&item, "id = ?", itemID).Error; err != nil {
 		if err == gorm.ErrRecordNotFound {
-			return memerrors.Wrap(memerrors.CodeNotFound, "item not found", err)
+			return wrapErr(CodeNotFound, "item not found", err)
 		}
-		return memerrors.Wrap(memerrors.CodeInternal, "query failed", err)
+		return wrapErr(CodeInternal, "query failed", err)
 	}
 
 	// Generate summary (simple truncation for now)
@@ -38,7 +37,7 @@ func (g *SummaryGenerator) GenerateItemSummary(ctx context.Context, itemID strin
 
 	result := g.db.WithContext(ctx).Model(&item).Update("summary", summary)
 	if result.Error != nil {
-		return memerrors.Wrap(memerrors.CodeInternal, "update summary failed", result.Error)
+		return wrapErr(CodeInternal, "update summary failed", result.Error)
 	}
 
 	return nil
@@ -53,11 +52,11 @@ func (g *SummaryGenerator) GenerateNamespaceSummary(ctx context.Context, namespa
 		Order("created_at DESC").
 		Limit(50).
 		Find(&items).Error; err != nil {
-		return "", memerrors.Wrap(memerrors.CodeInternal, "query items failed", err)
+		return "", wrapErr(CodeInternal, "query items failed", err)
 	}
 
 	if len(items) == 0 {
-		return "", memerrors.Wrap(memerrors.CodeNotFound, "no items in namespace", nil)
+		return "", wrapErr(CodeNotFound, "no items in namespace", nil)
 	}
 
 	// Generate summary (simple concatenation for now)
@@ -87,11 +86,11 @@ func (g *SummaryGenerator) GenerateNamespaceSummary(ctx context.Context, namespa
 				UpdatedAt: now,
 			}
 			if err := g.db.WithContext(ctx).Create(&nsSummary).Error; err != nil {
-				return "", memerrors.Wrap(memerrors.CodeInternal, "create summary failed", err)
+				return "", wrapErr(CodeInternal, "create summary failed", err)
 			}
 			return summary, nil
 		}
-		return "", memerrors.Wrap(memerrors.CodeInternal, "query summary failed", err)
+		return "", wrapErr(CodeInternal, "query summary failed", err)
 	}
 
 	// Update existing
@@ -99,7 +98,7 @@ func (g *SummaryGenerator) GenerateNamespaceSummary(ctx context.Context, namespa
 	nsSummary.ItemCount = len(items)
 	nsSummary.UpdatedAt = now
 	if err := g.db.WithContext(ctx).Save(&nsSummary).Error; err != nil {
-		return "", memerrors.Wrap(memerrors.CodeInternal, "update summary failed", err)
+		return "", wrapErr(CodeInternal, "update summary failed", err)
 	}
 
 	return summary, nil
@@ -107,9 +106,11 @@ func (g *SummaryGenerator) GenerateNamespaceSummary(ctx context.Context, namespa
 
 // generateSummary creates a simple summary by truncating text.
 // In production, this would use an LLM for intelligent summarization.
-func generateSummary(content string, maxLen int) string {
-	if len(content) <= maxLen {
+// Handles multi-byte characters (Chinese, emoji, etc.) correctly.
+func generateSummary(content string, maxRunes int) string {
+	runes := []rune(content)
+	if len(runes) <= maxRunes {
 		return content
 	}
-	return content[:maxLen-3] + "..."
+	return string(runes[:maxRunes-3]) + "..."
 }

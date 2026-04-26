@@ -319,7 +319,7 @@ func TestMemoryService_Callbacks(t *testing.T) {
 		},
 	}
 
-	svc := NewMemoryServiceWithConfig(db, config)
+	svc := NewMemoryService(db).WithConfig(config)
 
 	t.Run("onCreated callback", func(t *testing.T) {
 		id, _ := svc.Remember(ctx, RememberRequest{

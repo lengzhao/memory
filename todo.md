@@ -141,18 +141,18 @@
 ## 技术债务
 
 ### v2 待办（暂不实现）
-- **硬编码配置清理**: 成本计算、API URL、置信度阈值等（v1 可用即可）
+- ✅ **硬编码成本计算已移除**: 成本计算已移至调用方，库只返回 TotalTokens
 - **更多 LLM Provider**: ClaudeClient、OllamaClient
 - **前缀匹配策略**: `action/projA/*` 等通配符策略
 
 ### TD2. Context 使用完善
-- [ ] 所有 DB 操作传入 `ctx` 支持超时
-- [ ] HTTP Client 使用 `context.WithTimeout`
+- [x] 所有 DB 操作传入 `ctx` 支持超时
+- [x] HTTP Client 使用 `context.WithTimeout`
 
-### TD3. 日志简化
-- [ ] 移除库内日志打印，通过错误返回让调用方处理
-- [ ] 或支持传入简单 `Logger` 接口（避免强制依赖 slog/zap）
-- [ ] 示例：`type Logger interface { Printf(format string, v ...interface{}) }`
+### TD3. 日志简化 ✅
+- [x] 移除库内日志打印，通过错误返回让调用方处理
+- [x] 支持传入简单 `Logger` 接口（避免强制依赖 slog/zap）
+- [x] 实现：`type Logger interface { Printf(format string, v ...interface{}) }`
 
 ---
 

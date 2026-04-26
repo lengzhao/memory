@@ -26,13 +26,9 @@ func SetupTestDB(t *testing.T) *gorm.DB {
 		t.Fatalf("Failed to init test DB: %v", err)
 	}
 
-	// Run migrations
 	if err := Migrate(db); err != nil {
 		t.Fatalf("Failed to migrate: %v", err)
 	}
-
-	// Run FTS migration (ignore errors from existing tables)
-	_ = ExecMigrationFile(db, "../migrations/001_initial_schema.sql")
 
 	t.Cleanup(func() {
 		Close(db)

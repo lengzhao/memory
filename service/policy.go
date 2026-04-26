@@ -9,11 +9,10 @@ import (
 	"gorm.io/gorm"
 
 	"github.com/lengzhao/memory/model"
-	memerrors "github.com/lengzhao/memory/pkg/errors"
 )
 
-// DefaultNamespacePolicies provides default policies for each namespace type.
-var DefaultNamespacePolicies = map[model.NamespaceType]model.NamespacePolicy{
+// defaultNamespacePolicies provides default policies for each namespace type.
+var defaultNamespacePolicies = map[model.NamespaceType]model.NamespacePolicy{
 	model.NamespaceTypeTransient: {
 		Namespace:                 "transient/*",
 		TTLSeconds:                intPtr(259200), // 3 days
@@ -76,17 +75,17 @@ func (pm *PolicyManager) GetPolicy(ctx context.Context, namespace string) (model
 	}
 
 	if err != gorm.ErrRecordNotFound {
-		return model.NamespacePolicy{}, memerrors.Wrap(memerrors.CodeInternal, "query policy failed", err)
+		return model.NamespacePolicy{}, wrapErr(CodeInternal, "query policy failed", err)
 	}
 
 	// Fall back to type default
 	nsType := inferNamespaceType(namespace)
-	if defaultPolicy, ok := DefaultNamespacePolicies[nsType]; ok {
+	if defaultPolicy, ok := defaultNamespacePolicies[nsType]; ok {
 		return defaultPolicy, nil
 	}
 
 	// Ultimate fallback
-	return DefaultNamespacePolicies[model.NamespaceTypeTransient], nil
+	return defaultNamespacePolicies[model.NamespaceTypeTransient], nil
 }
 
 // SetPolicy sets a custom policy for a namespace (exact match only).
@@ -101,17 +100,17 @@ func (pm *PolicyManager) SetPolicy(ctx context.Context, policy model.NamespacePo
 		if err == gorm.ErrRecordNotFound {
 			// Create new
 			if err := pm.db.WithContext(ctx).Create(&policy).Error; err != nil {
-				return memerrors.Wrap(memerrors.CodeInternal, "create policy failed", err)
+				return wrapErr(CodeInternal, "create policy failed", err)
 			}
 			return nil
 		}
-		return memerrors.Wrap(memerrors.CodeInternal, "query policy failed", err)
+		return wrapErr(CodeInternal, "query policy failed", err)
 	}
 
 	// Update existing
 	policy.CreatedAt = existing.CreatedAt
 	if err := pm.db.WithContext(ctx).Save(&policy).Error; err != nil {
-		return memerrors.Wrap(memerrors.CodeInternal, "update policy failed", err)
+		return wrapErr(CodeInternal, "update policy failed", err)
 	}
 
 	return nil

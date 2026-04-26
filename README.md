@@ -13,10 +13,10 @@
 ### 基础功能（无需API Key）
 
 ```bash
-# 初始化数据库
-go run cmd/server/main.go
+# 初始化数据库（在仓库根目录执行）
+go run examples/07_server_init/main.go
 
-# 数据库文件位置
+# 数据库文件位置（默认工作目录下）
 ./memory.db
 ```
 
@@ -26,8 +26,8 @@ go run cmd/server/main.go
 # 1. 设置环境变量
 export OPENAI_API_KEY=sk-your-api-key
 
-# 2. 运行演示
-go run cmd/extract_demo/main.go
+# 2. 运行完整 LLM 提取演示
+go run examples/08_extract_demo/main.go
 ```
 
 **详细配置说明**：[docs/openai-setup.md](docs/openai-setup.md)
@@ -57,13 +57,13 @@ export OPENAI_MODEL=llama3.1:8b
 export OPENAI_API_KEY=ollama
 
 # 3. 运行
-go run cmd/extract_demo/main.go
+go run examples/08_extract_demo/main.go
 ```
 
 ## 自动提取演示
 
 ```bash
-$ go run cmd/extract_demo/main.go
+$ go run examples/08_extract_demo/main.go
 
 ============================================================
 LLM Memory Extraction Demo
@@ -106,38 +106,37 @@ Total memories: 4
 
 ```
 memory/
-├── cmd/
-│   ├── server/         # 主程序入口
-│   └── extract_demo/   # LLM提取演示程序
-├── model/              # GORM 模型定义（对外暴露）
-│   └── memory.go       # 所有表结构
-├── service/            # 业务逻辑服务
-│   └── extractor.go    # LLM提取服务
-├── store/              # 数据库初始化和迁移
-│   └── db.go           # GORM 配置
-├── migrations/         # SQL 迁移文件
-│   └── 001_initial_schema.sql  # FTS5 虚拟表 + 触发器
+├── examples/           # 可执行示例（含 DB 初始化、LLM 完整演示等）
+│   ├── 07_server_init/ # 最简：Migrate + 插入/查询/FTS
+│   └── 08_extract_demo/# 多轮对话 LLM 提取
+├── model/              # GORM 模型（表结构单一来源）
+│   └── memory.go
+├── service/            # 业务逻辑（Memory、提取、策略、决策等）
+├── store/              # DB 连接与 schema：`Migrate` = AutoMigrate + FTS5
+│   ├── db.go
+│   └── fts.go          # FTS5 虚表与触发器（GORM 无法表达的部分）
 ├── docs/
-│   └── memory.md       # 详细技术方案 v0.3
+│   └── memory.md       # 详细技术方案
 ├── go.mod
 └── README.md
 ```
 
-> **集成说明**：其他项目引用本模块时，只需 `import "github.com/lengzhao/memory"` 即可使用所有功能。也可按需引用子包 `model`、`service`、`store`。
+**Schema**：仅通过 `memory.Migrate(db)`（或 `store.Migrate`）初始化。GORM `AutoMigrate` 创建业务表；`store` 内建 FTS5 虚表与同步触发器。提取 **Prompt 可不建表行**：未配置 `is_default` 的 `extraction_prompts` 时，`Extract` 使用 `service` 包内建默认（`dialog_extractions.prompt_id` 记为 `prompt-default-v1`）。需要定制时在 DB 中新增/设置 `is_default` 即可。不使用独立 SQL 迁移目录。
+
+> **集成说明**：`import "github.com/lengzhao/memory"` 即可；也可按需引用子包 `model`、`service`、`store`。
 
 ## 核心特性 v0.3
 
-- ✅ 多 namespace 分层存储 (transient/profile/action/knowledge - 简化4类)
+- ✅ 多 namespace 分层存储 (transient/profile/action/knowledge)
 - ✅ **并发控制**：乐观锁 (`version` 字段)
-- ✅ **幂等写入**：`dedupe_key` + `request_id` 防重复
+- ✅ **幂等写入**：`dedupe_key`（同一 namespace 内唯一）等
 - ✅ **TTL 策略**：fixed / sliding / manual 三种模式
 - ✅ **可恢复删除**：软删后保留在 `deleted_items` 表
 - ✅ **全文搜索**：FTS5 虚表 + 自动同步触发器
 - ✅ **策略持久化**：`namespace_policies` 表存储配置
-- ✅ **事件追踪**：完整审计日志 (`memory_events`)
-- ✅ **🆕 LLM集成**：支持配置多个 Provider（OpenAI/Claude/Ollama）
-- ✅ **🆕 自动提取**：对话内容自动分类到 6 类 namespace
-- ✅ **🆕 智能分类**：自动识别 transient/profile/action/knowledge
+- ✅ **事件追踪**：审计日志 (`memory_events`)
+- ✅ **LLM 集成**：多 Provider（OpenAI/Claude/Ollama）
+- ✅ **自动提取**：对话内容分类到上述 4 类 namespace
 
 ## 数据模型
 
@@ -146,17 +145,18 @@ memory/
 | 表名 | 说明 |
 |------|------|
 | `memory_items` | 核心记忆条目 |
-| `memory_links` | 记忆间关系（支持/contradicts/derived_from等） |
+| `memory_links` | 记忆间关系 |
 | `namespace_summaries` | 命名空间摘要 |
 | `namespace_policies` | 命名空间策略配置 |
 | `memory_events` | 审计事件日志 |
 | `deleted_items` | 软删恢复表 |
-| `fts_memory` | FTS5 全文搜索虚表 |
-| `llm_configs` | LLM Provider 配置（API key加密存储） |
+| `memory_merges` | 合并操作记录（决策引擎） |
+| `fts_memory` | FTS5 全文搜索虚表（由 `Migrate` 创建） |
+| `llm_configs` | LLM Provider 配置（`api_key` 由调用方自行加解密后存储） |
 | `extraction_prompts` | 提取 Prompt 模板 |
 | `dialog_extractions` | 对话提取记录（幂等检测） |
 
-详见 `internal/model/memory.go` 和 `docs/memory.md`。
+详见 `model/memory.go` 与 `docs/memory.md`。
 
 ## 许可证
 

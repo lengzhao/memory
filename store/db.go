@@ -3,7 +3,6 @@ package store
 
 import (
 	"fmt"
-	"os"
 
 	"github.com/glebarez/sqlite" // Pure Go SQLite driver
 	"gorm.io/gorm"
@@ -14,9 +13,9 @@ import (
 
 // Config holds database configuration
 type Config struct {
-	Path        string
-	WALEnabled  bool
-	LogLevel    logger.LogLevel
+	Path       string
+	WALEnabled bool
+	LogLevel   logger.LogLevel
 }
 
 // DefaultConfig returns default database configuration
@@ -57,8 +56,8 @@ func buildDSN(cfg Config) string {
 	return base
 }
 
-// Migrate runs GORM AutoMigrate for all models
-// Note: FTS5 virtual table must be created via SQL migration
+// Migrate runs GORM AutoMigrate for all models, then creates the FTS5 virtual table
+// and triggers (not expressible in GORM). This is the only supported schema path.
 func Migrate(db *gorm.DB) error {
 	models := []interface{}{
 		&model.MemoryItem{},
@@ -67,32 +66,19 @@ func Migrate(db *gorm.DB) error {
 		&model.NamespacePolicy{},
 		&model.MemoryEvent{},
 		&model.DeletedItem{},
-		// v0.3: LLM Integration
 		&model.LLMConfig{},
 		&model.ExtractionPrompt{},
 		&model.DialogExtraction{},
-		// FTSMemory is excluded - it's a virtual table
+		&model.MemoryMerge{},
+		// fts_memory: virtual table, created in installFTS5
 	}
 
 	if err := db.AutoMigrate(models...); err != nil {
 		return fmt.Errorf("auto migration failed: %w", err)
 	}
 
-	return nil
-}
-
-// ExecMigrationFile executes SQL statements from a migration file
-func ExecMigrationFile(db *gorm.DB, filepath string) error {
-	sql, err := os.ReadFile(filepath)
-	if err != nil {
-		return fmt.Errorf("failed to read migration file: %w", err)
-	}
-
-	// SQLite doesn't support executing multiple statements in one Exec in some drivers
-	// So we need to split and execute individually
-	// For simplicity, we assume the migration is valid and execute as-is
-	if err := db.Exec(string(sql)).Error; err != nil {
-		return fmt.Errorf("failed to execute migration: %w", err)
+	if err := installFTS5(db); err != nil {
+		return err
 	}
 
 	return nil

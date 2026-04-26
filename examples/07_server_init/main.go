@@ -1,4 +1,4 @@
-// Main entry point for the memory server.
+// Example: 数据库初始化与 GORM/FTS 最简演示
 package main
 
 import (
@@ -11,7 +11,6 @@ import (
 )
 
 func main() {
-	// Initialize database
 	cfg := store.DefaultConfig()
 	cfg.LogLevel = 4 // Info level for demo
 
@@ -21,20 +20,11 @@ func main() {
 	}
 	defer store.Close(db)
 
-	// Run GORM auto-migration (creates all tables except FTS5 virtual table)
-	fmt.Println("Running GORM AutoMigrate...")
+	fmt.Println("Running schema migration (AutoMigrate + FTS5)...")
 	if err := store.Migrate(db); err != nil {
 		log.Fatalf("Migration failed: %v", err)
 	}
 
-	// Execute SQL migration for FTS5 virtual table and triggers
-	fmt.Println("Executing FTS5 migration...")
-	if err := store.ExecMigrationFile(db, "migrations/001_initial_schema.sql"); err != nil {
-		// FTS5 might already exist, continue
-		fmt.Printf("Migration file execution (may already exist): %v\n", err)
-	}
-
-	// Example: Insert a memory item
 	fmt.Println("\nInserting sample memory...")
 	now := time.Now()
 	item := model.MemoryItem{
@@ -60,7 +50,6 @@ func main() {
 		fmt.Printf("Created item: %s\n", item.ID)
 	}
 
-	// Example: Query memory items
 	fmt.Println("\nQuerying memory items...")
 	var items []model.MemoryItem
 	if err := db.Where("status = ?", model.ItemStatusActive).
@@ -74,7 +63,6 @@ func main() {
 		}
 	}
 
-	// Example: FTS5 search (using raw SQL since FTS is virtual table)
 	fmt.Println("\nFTS5 search for 'sample':")
 	var ftsResults []struct {
 		ItemID  string
@@ -96,19 +84,18 @@ func main() {
 		}
 	}
 
-	// Example: Insert a policy
 	fmt.Println("\nInserting namespace policy...")
 	policy := model.NamespacePolicy{
-		Namespace:               "session/*",
-		TTLSeconds:              intPtr(2592000), // 30 days
-		TTLPolicy:               model.TTLPolicySliding,
-		SlidingTTLThreshold:     3,
-		SummaryEnabled:          true,
+		Namespace:                 "session/*",
+		TTLSeconds:                intPtr(2592000), // 30 days
+		TTLPolicy:                 model.TTLPolicySliding,
+		SlidingTTLThreshold:       3,
+		SummaryEnabled:            true,
 		SummaryItemTokenThreshold: 500,
-		RankWeightsJSON:         `{"fts":0.55,"recency":0.20,"importance":0.15,"confidence":0.10}`,
-		DefaultTopK:             10,
-		CreatedAt:               now,
-		UpdatedAt:               now,
+		RankWeightsJSON:           `{"fts":0.55,"recency":0.20,"importance":0.15,"confidence":0.10}`,
+		DefaultTopK:               10,
+		CreatedAt:                 now,
+		UpdatedAt:                 now,
 	}
 
 	if err := db.Create(&policy).Error; err != nil {

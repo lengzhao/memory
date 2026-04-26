@@ -21,19 +21,16 @@
 //	db.Create(&item)
 //
 // Features:
-//   - Multi-namespace storage (session, profile, task, kb, skills, sop)
+//   - Multi-namespace storage (transient, profile, action, knowledge)
 //   - Full-text search with FTS5
 //   - TTL/expiration management (fixed, sliding, manual)
 //   - Optimistic locking for concurrent updates
 //   - Idempotent writes with dedupe_key
 //   - LLM-based automatic memory extraction
-//
 package memory
 
 import (
 	"github.com/lengzhao/memory/model"
-	"github.com/lengzhao/memory/pkg/errors"
-	"github.com/lengzhao/memory/pkg/llm"
 	"github.com/lengzhao/memory/service"
 	"github.com/lengzhao/memory/store"
 )
@@ -43,37 +40,27 @@ import (
 // Model types
 type (
 	// Core memory types
-	MemoryItem          = model.MemoryItem
-	MemoryLink          = model.MemoryLink
-	NamespaceSummary    = model.NamespaceSummary
-	NamespacePolicy     = model.NamespacePolicy
-	MemoryEvent         = model.MemoryEvent
-	DeletedItem         = model.DeletedItem
-	FTSMemory           = model.FTSMemory
+	MemoryItem      = model.MemoryItem
+	NamespacePolicy = model.NamespacePolicy
 
-	// LLM integration types
-	LLMConfig           = model.LLMConfig
-	ExtractionPrompt    = model.ExtractionPrompt
-	DialogExtraction    = model.DialogExtraction
+	// LLM / extraction (DB 模型，常用者保留在根包)
+	ExtractionPrompt = model.ExtractionPrompt
 
 	// Enum types
-	NamespaceType       = model.NamespaceType
-	ItemStatus          = model.ItemStatus
-	SourceType          = model.SourceType
-	LinkType            = model.LinkType
-	TTLPolicy           = model.TTLPolicy
-	EventType           = model.EventType
-	LLMProvider         = model.LLMProvider
-	ExtractionStatus    = model.ExtractionStatus
+	NamespaceType = model.NamespaceType
+	ItemStatus    = model.ItemStatus
+	SourceType    = model.SourceType
+	TTLPolicy     = model.TTLPolicy
+	LLMProvider   = model.LLMProvider
 )
 
 // Enum constants
 const (
 	// Namespace types (simplified 4 categories)
-	NamespaceTransient = model.NamespaceTypeTransient  // Short-term context
-	NamespaceProfile   = model.NamespaceTypeProfile    // User preferences
-	NamespaceAction    = model.NamespaceTypeAction     // Tasks/todos
-	NamespaceKnowledge = model.NamespaceTypeKnowledge  // Facts/skills
+	NamespaceTransient = model.NamespaceTypeTransient // Short-term context
+	NamespaceProfile   = model.NamespaceTypeProfile   // User preferences
+	NamespaceAction    = model.NamespaceTypeAction    // Tasks/todos
+	NamespaceKnowledge = model.NamespaceTypeKnowledge // Facts/skills
 
 	// Item statuses
 	StatusActive   = model.ItemStatusActive
@@ -93,18 +80,17 @@ const (
 	TTLManual  = model.TTLPolicyManual
 
 	// LLM providers
-	ProviderOpenAI   = model.LLMProviderOpenAI
-	ProviderClaude   = model.LLMProviderClaude
-	ProviderOllama   = model.LLMProviderOllama
-	ProviderCustom   = model.LLMProviderCustom
-)
+	ProviderOpenAI = model.LLMProviderOpenAI
+	ProviderClaude = model.LLMProviderClaude
+	ProviderOllama = model.LLMProviderOllama
+	ProviderCustom = model.LLMProviderCustom
 
-// Service types
-type (
-	Extractor         = service.Extractor
-	ExtractRequest      = service.ExtractRequest
-	ExtractedMemory     = service.ExtractedMemory
-	ExtractResult       = service.ExtractResult
+	// Decision types
+	DecisionAdd    = service.DecisionAdd
+	DecisionUpdate = service.DecisionUpdate
+	DecisionDelete = service.DecisionDelete
+	DecisionIgnore = service.DecisionIgnore
+	DecisionMerge  = service.DecisionMerge
 )
 
 // Store types and functions
@@ -122,58 +108,87 @@ var (
 	Close  = store.Close
 
 	// Migration
-	Migrate            = store.Migrate
-	ExecMigrationFile  = store.ExecMigrationFile
+	Migrate = store.Migrate
 )
 
 // Service types
 type (
-	MemoryService     = service.MemoryService
-	ServiceConfig     = service.Config
-	RememberRequest   = service.RememberRequest
-	RecallRequest     = service.RecallRequest
-	MemoryHit         = service.MemoryHit
-	ForgetRequest     = service.ForgetRequest
-	UpdateRequest     = service.UpdateRequest
-	SummaryGenerator  = service.SummaryGenerator
-	PolicyManager     = service.PolicyManager
+	MemoryService    = service.MemoryService
+	ServiceConfig    = service.Config
+	RememberRequest  = service.RememberRequest
+	RecallRequest    = service.RecallRequest
+	MemoryHit        = service.MemoryHit
+	ForgetRequest    = service.ForgetRequest
+	UpdateRequest    = service.UpdateRequest
+	PolicyManager    = service.PolicyManager
+	DecisionEngine   = service.DecisionEngine
+	DecisionType     = service.DecisionType
+	DecisionRequest  = service.DecisionRequest
+	DecisionResult   = service.DecisionResult
+	MemoryDecision   = service.MemoryDecision
+	SimilarMemory    = service.SimilarMemory
+	ExecutionResult  = service.ExecutionResult
+	Extractor        = service.Extractor
+	ExtractRequest   = service.ExtractRequest
+	ExtractedMemory  = service.ExtractedMemory
+	ExtractResult    = service.ExtractResult
+
+	// Logger for extractor (optional, nil = silent mode)
+	Logger = service.Logger
 )
 
-// Error types
-var (
-	ErrNotFound     = errors.ErrNotFound
-	ErrConflict     = errors.ErrConflict
-	ErrDuplicate    = errors.ErrDuplicate
-	ErrValidation   = errors.ErrValidation
-	ErrUnauthorized = errors.ErrUnauthorized
-	ErrLLM          = errors.ErrLLM
-)
-
-// LLM types
+// Error types（实现位于 service 包，根包重导出以单 import 使用）
 type (
-	LLMClient         = llm.Client
-	LLMCompletionReq  = llm.CompletionRequest
-	LLMCompletionResp  = llm.CompletionResponse
-	LLMExtractMemory   = llm.ExtractMemory
-	LLMExtractResult   = llm.ExtractResult
-	LLMExtractor       = llm.Extractor
+	MemoryError = service.MemoryError
+	ErrorCode   = service.ErrorCode
 )
 
-// LLM functions
+const (
+	CodeNotFound     = service.CodeNotFound
+	CodeConflict     = service.CodeConflict
+	CodeDuplicate    = service.CodeDuplicate
+	CodeValidation   = service.CodeValidation
+	CodeUnauthorized = service.CodeUnauthorized
+	CodeLLM          = service.CodeLLM
+	CodeInternal     = service.CodeInternal
+)
+
 var (
-	NewLLMExtractor    = llm.NewExtractor
-	NewOpenAIClient    = llm.NewOpenAIClient
+	ErrNotFound     = service.ErrNotFound
+	ErrConflict     = service.ErrConflict
+	ErrDuplicate    = service.ErrDuplicate
+	ErrValidation   = service.ErrValidation
+	ErrUnauthorized = service.ErrUnauthorized
+	ErrLLM          = service.ErrLLM
+
+	// 结构化错误构造与解析
+	ErrorNew  = service.ErrorNew
+	ErrorWrap = service.ErrorWrap
+	ErrorAs   = service.ErrorAs
 )
 
 // Service functions
 var (
 	// Create new service/extractor instances
-	NewMemoryService         = service.NewMemoryService
-	NewMemoryServiceWithConfig = service.NewMemoryServiceWithConfig
-	NewSummaryGenerator      = service.NewSummaryGenerator
-	NewPolicyManager         = service.NewPolicyManager
-	NewExtractor             = service.NewExtractor
+	NewMemoryService   = service.NewMemoryService
+	NewPolicyManager   = service.NewPolicyManager
+	NewExtractor       = service.NewExtractor
+	NewDecisionEngine  = service.NewDecisionEngine
 )
+
+// 下列符号在 service 包定义，根包再导出便于单 import。
+
+// DefaultExtractionSystemPrompt 为未配置 DB 时 Extract 使用的内建 system 全文。
+const DefaultExtractionSystemPrompt = service.DefaultExtractionSystemPrompt
+
+// DefaultExtractionJSONSchema 与上配套。
+const DefaultExtractionJSONSchema = service.DefaultExtractionJSONSchema
+
+// DefaultExtractionPromptID 为内建/占位提示在 dialog_extractions.prompt_id 中使用的 id（可不在表中建行）。
+const DefaultExtractionPromptID = service.DefaultExtractionPromptID
+
+// BuiltinExtractionPrompt 为内建记忆提取模板（与 service 包一致）。
+var BuiltinExtractionPrompt = service.BuiltinExtractionPrompt
 
 // Utility functions
 var (
