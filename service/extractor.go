@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -405,33 +406,40 @@ func (e *Extractor) callOpenAI(ctx context.Context, cfg model.LLMConfig, prompt 
 
 // persistMemory saves extracted memory to database
 func (e *Extractor) persistMemory(ctx context.Context, mem ExtractedMemory) error {
-	now := time.Now()
-	item := model.MemoryItem{
-		ID:            model.GenerateID(),
-		Namespace:     fmt.Sprintf("%s/auto/%s", mem.Namespace, time.Now().Format("20060102")),
-		NamespaceType: mem.Namespace,
-		Title:         mem.Title,
-		Content:       mem.Content,
-		Summary:       mem.Summary,
-		TagsJSON:      toJSON(mem.Tags),
-		SourceType:    model.SourceTypeAgent,
-		Importance:    mem.Importance,
-		Confidence:    mem.Confidence,
-		Status:        model.ItemStatusActive,
-		CreatedAt:     now,
-		UpdatedAt:     now,
-		Version:       1,
+	// Scope duplicate checks to the resolved namespace to avoid cross-session leakage.
+	ns := buildDefaultNamespace(mem.Namespace)
+	if isIsolationEnabled(ctx) {
+		meta, err := IsolationFromContext(ctx)
+		if err != nil {
+			return err
+		}
+		ns = buildNamespace(meta, mem.Namespace)
 	}
 
-	// Check for duplicate by content hash (simplified)
 	var existing model.MemoryItem
-	err := e.db.WithContext(ctx).Where("namespace_type = ? AND content = ?", mem.Namespace, mem.Content).First(&existing).Error
+	err := e.db.WithContext(ctx).
+		Where("namespace = ? AND namespace_type = ? AND content = ?", ns, mem.Namespace, mem.Content).
+		First(&existing).Error
 	if err == nil {
 		// Duplicate found, skip
 		return nil
 	}
+	if !errors.Is(err, gorm.ErrRecordNotFound) {
+		return err
+	}
 
-	return e.db.WithContext(ctx).Create(&item).Error
+	svc := NewMemoryService(e.db)
+	_, err = svc.Remember(ctx, RememberRequest{
+		NamespaceType: mem.Namespace,
+		Title:         mem.Title,
+		Content:       mem.Content,
+		Summary:       mem.Summary,
+		Tags:          mem.Tags,
+		SourceType:    model.SourceTypeAgent,
+		Importance:    mem.Importance,
+		Confidence:    mem.Confidence,
+	})
+	return err
 }
 
 // persistWithDecisionEngine uses the new flow: extract → find similar → decide → persist
@@ -514,7 +522,7 @@ func deduplicateSimilarMemories(allSimilar map[string][]SimilarMemory) []Similar
 
 // resolveLLMConfig resolves runtime LLM config from request.
 // Returns the config, a recordable ID, and error.
-func (e *Extractor) resolveLLMConfig(ctx context.Context, req ExtractRequest) (model.LLMConfig, string, error) {
+func (e *Extractor) resolveLLMConfig(_ context.Context, req ExtractRequest) (model.LLMConfig, string, error) {
 	if req.LLMConfig != nil {
 		cfg := *req.LLMConfig
 		if cfg.Provider == "" || cfg.Model == "" || cfg.APIKey == "" {

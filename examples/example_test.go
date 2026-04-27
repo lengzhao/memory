@@ -51,7 +51,9 @@ func Example() {
 
 // Example_memoryService demonstrates using MemoryService for common operations.
 func Example_memoryService() {
-	db, err := memory.InitDB(memory.DefaultConfig())
+	cfg := memory.DefaultConfig()
+	cfg.Path = ":memory:"
+	db, err := memory.InitDB(cfg)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -60,10 +62,10 @@ func Example_memoryService() {
 	// Create service
 	svc := memory.NewMemoryService(db)
 	ctx := context.Background()
+	ctx = memory.WithIsolation(ctx, "t1", "u1", "s1", "assistant")
 
 	// Store a memory
 	id, err := svc.Remember(ctx, memory.RememberRequest{
-		Namespace:     "user/preferences",
 		NamespaceType: memory.NamespaceProfile,
 		Title:         "Theme Preference",
 		Content:       "User prefers dark theme",
@@ -78,13 +80,68 @@ func Example_memoryService() {
 
 	// Recall memories
 	hits, err := svc.Recall(ctx, memory.RecallRequest{
-		Namespaces: []string{"user/preferences"},
-		TopK:       10,
+		NamespaceTypes: []memory.NamespaceType{memory.NamespaceProfile},
+		TopK:           10,
 	})
 	if err != nil {
 		log.Fatal(err)
 	}
 	fmt.Printf("Found %d memories\n", len(hits))
+}
+
+// Example_memoryService_contextIsolation demonstrates context-based isolation.
+func Example_memoryService_contextIsolation() {
+	cfg := memory.DefaultConfig()
+	cfg.Path = ":memory:"
+	db, err := memory.InitDB(cfg)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer memory.Close(db)
+
+	svc := memory.NewMemoryService(db)
+
+	ctxS1 := context.Background()
+	ctxS1 = memory.WithIsolation(ctxS1, "t1", "u1", "s1", "planner")
+
+	ctxS2 := context.Background()
+	ctxS2 = memory.WithIsolation(ctxS2, "t1", "u1", "s2", "planner")
+
+	_, err = svc.Remember(ctxS1, memory.RememberRequest{
+		NamespaceType: memory.NamespaceTransient,
+		Content:       "only-in-session-1",
+		SourceType:    memory.SourceUser,
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	_, err = svc.Remember(ctxS2, memory.RememberRequest{
+		NamespaceType: memory.NamespaceTransient,
+		Content:       "only-in-session-2",
+		SourceType:    memory.SourceUser,
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	hitsS1, err := svc.Recall(ctxS1, memory.RecallRequest{
+		NamespaceTypes: []memory.NamespaceType{memory.NamespaceTransient},
+		TopK:           10,
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+	hitsS2, err := svc.Recall(ctxS2, memory.RecallRequest{
+		NamespaceTypes: []memory.NamespaceType{memory.NamespaceTransient},
+		TopK:           10,
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	fmt.Printf("s1=%d,s2=%d\n", len(hitsS1), len(hitsS2))
+	// Output: s1=1,s2=1
 }
 
 // Example_extractor demonstrates automatic memory extraction from dialog.

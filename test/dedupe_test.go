@@ -18,7 +18,6 @@ func TestDedupe_DedupeKey(t *testing.T) {
 
 	// Create first item
 	id1, err := svc.Remember(ctx, memory.RememberRequest{
-		Namespace: "test/dedupe",
 		Content:   "First content",
 		DedupeKey: &dedupeKey,
 	})
@@ -28,7 +27,6 @@ func TestDedupe_DedupeKey(t *testing.T) {
 
 	// Create second item with same dedupe_key
 	id2, err := svc.Remember(ctx, memory.RememberRequest{
-		Namespace: "test/dedupe",
 		Content:   "Second content (should be deduped)",
 		DedupeKey: &dedupeKey,
 	})
@@ -43,7 +41,6 @@ func TestDedupe_DedupeKey(t *testing.T) {
 
 	// Should only have 1 item
 	hits, err := svc.Recall(ctx, memory.RecallRequest{
-		Namespaces: []string{"test/dedupe"},
 	})
 	if err != nil {
 		t.Fatalf("Failed to recall: %v", err)
@@ -63,17 +60,17 @@ func TestDedupe_NamespaceScope(t *testing.T) {
 	dedupeKey := "shared-key-across-namespaces"
 
 	id1, err := svc.Remember(ctx, memory.RememberRequest{
-		Namespace: "ns/one",
-		Content:   "A",
-		DedupeKey: &dedupeKey,
+		NamespaceType: memory.NamespaceProfile,
+		Content:       "A",
+		DedupeKey:     &dedupeKey,
 	})
 	if err != nil {
 		t.Fatalf("first remember: %v", err)
 	}
 	id2, err := svc.Remember(ctx, memory.RememberRequest{
-		Namespace: "ns/two",
-		Content:   "B",
-		DedupeKey: &dedupeKey,
+		NamespaceType: memory.NamespaceAction,
+		Content:       "B",
+		DedupeKey:     &dedupeKey,
 	})
 	if err != nil {
 		t.Fatalf("second remember: %v", err)
@@ -94,7 +91,6 @@ func TestDedupe_EmptyDedupeKey(t *testing.T) {
 
 	// Test with nil dedupe_key - should allow multiple items
 	id1, err := svc.Remember(ctx, memory.RememberRequest{
-		Namespace: "test/dedupe-nil",
 		Content:   "First",
 		DedupeKey: nil, // nil should be ignored
 	})
@@ -103,7 +99,6 @@ func TestDedupe_EmptyDedupeKey(t *testing.T) {
 	}
 
 	id2, err := svc.Remember(ctx, memory.RememberRequest{
-		Namespace: "test/dedupe-nil",
 		Content:   "Second",
 		DedupeKey: nil,
 	})

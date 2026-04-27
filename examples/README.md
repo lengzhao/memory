@@ -12,7 +12,6 @@ examples/
 ├── 04_callback/         # 回调
 ├── 05_extract/          # LLM 提取（子包与 facade 示例）
 ├── 06_policy/           # Namespace 策略
-├── 07_server_init/      # 最简：InitDB、Migrate、GORM/FTS 直查
 ├── 08_extract_demo/     # 完整多轮 LLM 提取 + 落库（需 OPENAI_API_KEY 等）
 └── README.md
 ```
@@ -32,7 +31,6 @@ go run 03_ttl/main.go
 go run 04_callback/main.go
 go run 05_extract/main.go
 go run 06_policy/main.go
-go run 07_server_init/main.go
 go run 08_extract_demo/main.go
 ```
 
@@ -82,9 +80,6 @@ go run 08_extract_demo/main.go
 - 为特定namespace设置自定义策略（TTL、排序权重）
 - 策略继承和回退机制
 - 精确匹配 vs 类型默认
-
-### 07_server_init - 数据库初始化最简流
-- `store.InitDB` / `store.Migrate`、插入示例条、GORM 查询、FTS5 与策略写入（不依赖 `memory` 根包，便于看底层流）
 
 ### 08_extract_demo - 完整 LLM 提取演示
 - 多段对话、真实调用 Extractor 落库、打印 `dialog_extractions` 与全表记忆

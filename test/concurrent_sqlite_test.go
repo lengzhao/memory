@@ -49,7 +49,6 @@ func TestConcurrent_Remember_WithSharedCache(t *testing.T) {
 
 	// First, create one item to ensure DB is ready
 	_, err := svc.Remember(ctx, memory.RememberRequest{
-		Namespace: "test/concurrent",
 		Content:   "Setup content",
 	})
 	if err != nil {
@@ -66,7 +65,6 @@ func TestConcurrent_Remember_WithSharedCache(t *testing.T) {
 		go func(idx int) {
 			defer wg.Done()
 			_, err := svc.Remember(ctx, memory.RememberRequest{
-				Namespace: "test/concurrent",
 				Content:   "Content from goroutine",
 			})
 			if err != nil {
@@ -87,7 +85,6 @@ func TestConcurrent_Remember_WithSharedCache(t *testing.T) {
 
 	// Verify all created (including setup item) - allow some tolerance for race conditions
 	hits, err := svc.Recall(ctx, memory.RecallRequest{
-		Namespaces: []string{"test/concurrent"},
 	})
 	if err != nil {
 		t.Fatalf("Failed to recall: %v", err)
@@ -111,7 +108,6 @@ func TestConcurrent_Touch_WithSharedCache(t *testing.T) {
 
 	// Create item
 	id, err := svc.Remember(ctx, memory.RememberRequest{
-		Namespace: "test/concurrent-touch",
 		Content:   "Content",
 	})
 	if err != nil {
@@ -160,7 +156,6 @@ func TestConcurrent_RecallDuringWrite_WithSharedCache(t *testing.T) {
 		defer wg.Done()
 		for i := 0; i < 20; i++ {
 			_, err := svc.Remember(ctx, memory.RememberRequest{
-				Namespace: "test/concurrent-mixed",
 				Content:   "Write content",
 			})
 			if err != nil {
@@ -175,7 +170,6 @@ func TestConcurrent_RecallDuringWrite_WithSharedCache(t *testing.T) {
 		defer wg.Done()
 		for i := 0; i < 20; i++ {
 			_, err := svc.Recall(ctx, memory.RecallRequest{
-				Namespaces: []string{"test/concurrent-mixed"},
 			})
 			if err != nil {
 				t.Errorf("Read failed: %v", err)
@@ -197,7 +191,6 @@ func TestConcurrent_UpdateConflict_WithSharedCache(t *testing.T) {
 
 	// Create item
 	id, err := svc.Remember(ctx, memory.RememberRequest{
-		Namespace: "test/concurrent-update",
 		Content:   "Original",
 	})
 	if err != nil {

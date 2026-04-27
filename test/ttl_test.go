@@ -19,7 +19,6 @@ func TestTTL_FixedExpiration(t *testing.T) {
 	// Create item with 1 second TTL
 	ttl := 1
 	id, err := svc.Remember(ctx, memory.RememberRequest{
-		Namespace:     "test/ttl-fixed",
 		NamespaceType: memory.NamespaceTransient,
 		Content:       "Short lived content",
 		TTLSeconds:    &ttl,
@@ -30,7 +29,6 @@ func TestTTL_FixedExpiration(t *testing.T) {
 
 	// Should be found immediately
 	hits, err := svc.Recall(ctx, memory.RecallRequest{
-		Namespaces: []string{"test/ttl-fixed"},
 	})
 	if err != nil {
 		t.Fatalf("Failed to recall: %v", err)
@@ -44,7 +42,6 @@ func TestTTL_FixedExpiration(t *testing.T) {
 
 	// Should not be found (expired excluded by default)
 	hits, err = svc.Recall(ctx, memory.RecallRequest{
-		Namespaces: []string{"test/ttl-fixed"},
 	})
 	if err != nil {
 		t.Fatalf("Failed to recall: %v", err)
@@ -72,7 +69,6 @@ func TestTTL_IncludeExpired(t *testing.T) {
 	// Create item with 1 second TTL
 	ttl := 1
 	_, err := svc.Remember(ctx, memory.RememberRequest{
-		Namespace:  "test/ttl-include",
 		Content:    "Content",
 		TTLSeconds: &ttl,
 	})
@@ -85,7 +81,6 @@ func TestTTL_IncludeExpired(t *testing.T) {
 
 	// Should not be found without IncludeExpired
 	hits, _ := svc.Recall(ctx, memory.RecallRequest{
-		Namespaces: []string{"test/ttl-include"},
 	})
 	if len(hits) != 0 {
 		t.Error("Should not find expired item without IncludeExpired")
@@ -93,7 +88,6 @@ func TestTTL_IncludeExpired(t *testing.T) {
 
 	// Should be found with IncludeExpired
 	hits, err = svc.Recall(ctx, memory.RecallRequest{
-		Namespaces:     []string{"test/ttl-include"},
 		IncludeExpired: true,
 	})
 	if err != nil {
@@ -115,7 +109,6 @@ func TestTTL_CleanupExpired(t *testing.T) {
 	// Create item with very short TTL and wait for it to expire
 	ttl := 1 // 1 second
 	id, err := svc.Remember(ctx, memory.RememberRequest{
-		Namespace:  "test/ttl-cleanup",
 		Content:    "Expired content",
 		TTLSeconds: &ttl,
 	})
@@ -154,7 +147,6 @@ func TestTTL_RenewExpiration(t *testing.T) {
 	// Create item with short TTL
 	ttl := 1
 	id, err := svc.Remember(ctx, memory.RememberRequest{
-		Namespace:  "test/ttl-renew",
 		Content:    "Content to renew",
 		TTLSeconds: &ttl,
 	})
@@ -197,7 +189,6 @@ func TestTTL_SlidingRenewal(t *testing.T) {
 	// Create item with TTL
 	ttl := 60
 	id, err := svc.Remember(ctx, memory.RememberRequest{
-		Namespace:  "test/ttl-sliding",
 		Content:    "Sliding TTL content",
 		TTLSeconds: &ttl,
 	})

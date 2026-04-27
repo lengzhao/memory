@@ -17,7 +17,6 @@ func TestMemoryService_Remember(t *testing.T) {
 
 	t.Run("basic remember", func(t *testing.T) {
 		req := RememberRequest{
-			Namespace:     "test/basic",
 			NamespaceType: model.NamespaceTypeTransient,
 			Title:         "Test Memory",
 			Content:       "This is a test memory content.",
@@ -41,7 +40,6 @@ func TestMemoryService_Remember(t *testing.T) {
 	t.Run("dedupe key prevents duplicate", func(t *testing.T) {
 		key := "unique-key-123"
 		req := RememberRequest{
-			Namespace:     "test/dedupe",
 			NamespaceType: model.NamespaceTypeTransient,
 			Content:       "Original content",
 			DedupeKey:     &key,
@@ -67,7 +65,6 @@ func TestMemoryService_Remember(t *testing.T) {
 	t.Run("with TTL", func(t *testing.T) {
 		ttl := 3600 // 1 hour
 		req := RememberRequest{
-			Namespace:     "test/ttl",
 			NamespaceType: model.NamespaceTypeTransient,
 			Content:       "TTL test",
 			TTLSeconds:    &ttl,
@@ -97,7 +94,6 @@ func TestMemoryService_Recall(t *testing.T) {
 	// Seed data
 	for i := 0; i < 5; i++ {
 		_, _ = svc.Remember(ctx, RememberRequest{
-			Namespace:     "test/recall",
 			NamespaceType: model.NamespaceTypeKnowledge,
 			Title:         "Memory " + string(rune('A'+i)),
 			Content:       "Content about Go programming language.",
@@ -122,7 +118,6 @@ func TestMemoryService_Recall(t *testing.T) {
 
 	t.Run("namespace filter", func(t *testing.T) {
 		req := RecallRequest{
-			Namespaces: []string{"test/recall"},
 			TopK:       10,
 		}
 		hits, err := svc.Recall(ctx, req)
@@ -136,7 +131,6 @@ func TestMemoryService_Recall(t *testing.T) {
 
 	t.Run("tag filter", func(t *testing.T) {
 		req := RecallRequest{
-			Namespaces: []string{"test/recall"},
 			TagsAny:    []string{"go"},
 			TopK:       10,
 		}
@@ -157,7 +151,6 @@ func TestMemoryService_List(t *testing.T) {
 
 	create := func(title string) {
 		_, err := svc.Remember(ctx, RememberRequest{
-			Namespace:     "test/list",
 			NamespaceType: model.NamespaceTypeKnowledge,
 			Title:         title,
 			Content:       "List ordering test",
@@ -178,7 +171,6 @@ func TestMemoryService_List(t *testing.T) {
 
 	t.Run("default desc returns newest first", func(t *testing.T) {
 		items, err := svc.List(ctx, ListRequest{
-			Namespaces: []string{"test/list"},
 			TopK:       2,
 		})
 		if err != nil {
@@ -194,7 +186,6 @@ func TestMemoryService_List(t *testing.T) {
 
 	t.Run("asc returns oldest first", func(t *testing.T) {
 		items, err := svc.List(ctx, ListRequest{
-			Namespaces: []string{"test/list"},
 			TopK:       2,
 			Order:      "asc",
 		})
@@ -217,7 +208,6 @@ func TestMemoryService_Update(t *testing.T) {
 
 	// Create item
 	id, _ := svc.Remember(ctx, RememberRequest{
-		Namespace:     "test/update",
 		NamespaceType: model.NamespaceTypeTransient,
 		Title:         "Original",
 		Content:       "Original content",
@@ -275,7 +265,6 @@ func TestMemoryService_Forget(t *testing.T) {
 	var ids []string
 	for i := 0; i < 3; i++ {
 		id, _ := svc.Remember(ctx, RememberRequest{
-			Namespace:     "test/forget",
 			NamespaceType: model.NamespaceTypeTransient,
 			Content:       "To be deleted",
 		})
@@ -330,7 +319,6 @@ func TestMemoryService_Touch(t *testing.T) {
 	ctx := context.Background()
 
 	id, _ := svc.Remember(ctx, RememberRequest{
-		Namespace:     "test/touch",
 		NamespaceType: model.NamespaceTypeTransient,
 		Content:       "Test touch",
 	})
@@ -383,7 +371,6 @@ func TestMemoryService_Callbacks(t *testing.T) {
 
 	t.Run("onCreated callback", func(t *testing.T) {
 		id, _ := svc.Remember(ctx, RememberRequest{
-			Namespace:     "test/callback",
 			NamespaceType: model.NamespaceTypeTransient,
 			Content:       "Callback test",
 		})

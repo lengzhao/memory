@@ -112,6 +112,7 @@ var (
 type (
 	MemoryService    = service.MemoryService
 	ServiceConfig    = service.Config
+	IsolationMeta    = service.IsolationMeta
 	RememberRequest  = service.RememberRequest
 	RecallRequest    = service.RecallRequest
 	ListRequest      = service.ListRequest
@@ -183,6 +184,10 @@ var (
 var (
 	SetLogger = service.SetLogger
 	GetLogger = service.GetLogger
+
+	// Context-based isolation helpers
+	WithIsolation        = service.WithIsolation
+	IsolationFromContext = service.IsolationFromContext
 )
 
 // 下列符号在 service 包定义，根包再导出便于单 import。

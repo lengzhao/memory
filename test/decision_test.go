@@ -33,7 +33,6 @@ func TestDecision_FindSimilarMemories(t *testing.T) {
 
 	for _, content := range contents {
 		_, err := memory.NewMemoryService(tdb.DB).Remember(ctx, memory.RememberRequest{
-			Namespace:     "test/similar",
 			NamespaceType: memory.NamespaceKnowledge,
 			Content:       content,
 			Tags:          []string{"programming", "language"},
@@ -119,7 +118,6 @@ func TestDecision_ExecuteUpdate(t *testing.T) {
 
 	// Create existing memory
 	id, err := svc.Remember(ctx, memory.RememberRequest{
-		Namespace:  "test/update-decision",
 		Content:    "Old content that needs updating",
 		Importance: 50,
 	})
@@ -178,7 +176,6 @@ func TestDecision_ExecuteDelete(t *testing.T) {
 
 	// Create memory to delete
 	id, err := svc.Remember(ctx, memory.RememberRequest{
-		Namespace: "test/delete-decision",
 		Content:   "Content to be deleted",
 	})
 	if err != nil {
@@ -225,7 +222,6 @@ func TestDecision_ExecuteMerge(t *testing.T) {
 
 	// Create existing memory
 	id, err := svc.Remember(ctx, memory.RememberRequest{
-		Namespace:  "test/merge-decision",
 		Content:    "Original information",
 		Tags:       []string{"original"},
 		Importance: 50,

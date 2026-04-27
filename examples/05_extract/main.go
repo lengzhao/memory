@@ -24,6 +24,7 @@ import (
 
 func main() {
 	ctx := context.Background()
+	ctx = memory.WithIsolation(ctx, "demo-tenant", "demo-user", "extract-session", "extractor")
 
 	// 初始化数据库（DefaultConfig已启用AutoMigrate）
 	cfg := memory.DefaultConfig()

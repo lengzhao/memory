@@ -44,7 +44,6 @@ func (s *MemoryService) WithConfig(config Config) *MemoryService {
 
 // RememberRequest represents a request to store a memory.
 type RememberRequest struct {
-	Namespace     string
 	NamespaceType model.NamespaceType
 	Title         string
 	Content       string
@@ -60,13 +59,33 @@ type RememberRequest struct {
 
 // Remember stores a memory item with idempotency support.
 func (s *MemoryService) Remember(ctx context.Context, req RememberRequest) (string, error) {
+	if req.NamespaceType == "" {
+		req.NamespaceType = model.NamespaceTypeTransient
+	}
+
+	namespace := ""
+	if isIsolationEnabled(ctx) {
+		meta, err := IsolationFromContext(ctx)
+		if err != nil {
+			return "", err
+		}
+		namespace = buildNamespace(meta, req.NamespaceType)
+		if req.DedupeKey != nil && strings.TrimSpace(*req.DedupeKey) != "" {
+			prefixed := fmt.Sprintf("%s:%s:%s:%s:%s",
+				meta.TenantID, meta.UserID, meta.SessionID, meta.AgentID, strings.TrimSpace(*req.DedupeKey))
+			req.DedupeKey = &prefixed
+		}
+	} else {
+		namespace = buildDefaultNamespace(req.NamespaceType)
+	}
+
 	now := time.Now()
 
 	// Check for duplicate by dedupe_key if provided
 	if req.DedupeKey != nil && *req.DedupeKey != "" {
 		var existing model.MemoryItem
 		err := s.db.WithContext(ctx).
-			Where("namespace = ? AND dedupe_key = ?", req.Namespace, *req.DedupeKey).
+			Where("namespace = ? AND dedupe_key = ?", namespace, *req.DedupeKey).
 			First(&existing).Error
 		if err == nil {
 			// Duplicate found, return existing ID
@@ -86,7 +105,7 @@ func (s *MemoryService) Remember(ctx context.Context, req RememberRequest) (stri
 	textToTokenize := req.Title + " " + req.Content + " " + req.Summary
 	item := model.MemoryItem{
 		ID:            model.GenerateID(),
-		Namespace:     req.Namespace,
+		Namespace:     namespace,
 		NamespaceType: req.NamespaceType,
 		Title:         req.Title,
 		Content:       req.Content,
@@ -163,6 +182,17 @@ type MemoryHit struct {
 
 // Recall searches for memories using FTS and filtering.
 func (s *MemoryService) Recall(ctx context.Context, req RecallRequest) ([]MemoryHit, error) {
+	if isIsolationEnabled(ctx) {
+		meta, err := IsolationFromContext(ctx)
+		if err != nil {
+			return nil, err
+		}
+		if len(req.Namespaces) > 0 {
+			return nil, newErr(CodeValidation, "namespaces must not be provided when context isolation is enabled")
+		}
+		req.Namespaces = buildAllowedNamespaces(meta, req.NamespaceTypes)
+	}
+
 	if req.TopK <= 0 {
 		req.TopK = 10
 	}
@@ -277,6 +307,17 @@ func (s *MemoryService) Recall(ctx context.Context, req RecallRequest) ([]Memory
 
 // List returns memories ordered by created_at.
 func (s *MemoryService) List(ctx context.Context, req ListRequest) ([]model.MemoryItem, error) {
+	if isIsolationEnabled(ctx) {
+		meta, err := IsolationFromContext(ctx)
+		if err != nil {
+			return nil, err
+		}
+		if len(req.Namespaces) > 0 {
+			return nil, newErr(CodeValidation, "namespaces must not be provided when context isolation is enabled")
+		}
+		req.Namespaces = buildAllowedNamespaces(meta, req.NamespaceTypes)
+	}
+
 	if req.TopK <= 0 {
 		req.TopK = 10
 	}
@@ -488,6 +529,17 @@ type ForgetRequest struct {
 
 // Forget removes or marks memories as deleted/expired.
 func (s *MemoryService) Forget(ctx context.Context, req ForgetRequest) (int, error) {
+	if isIsolationEnabled(ctx) {
+		meta, err := IsolationFromContext(ctx)
+		if err != nil {
+			return 0, err
+		}
+		if strings.TrimSpace(req.Namespace) != "" {
+			return 0, newErr(CodeValidation, "namespace must not be provided when context isolation is enabled")
+		}
+		req.Namespace = buildNamespace(meta, req.NamespaceType)
+	}
+
 	if req.Mode == "" {
 		req.Mode = "soft"
 	}

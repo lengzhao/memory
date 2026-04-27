@@ -14,6 +14,7 @@ import (
 
 func main() {
 	ctx := context.Background()
+	ctx = memory.WithIsolation(ctx, "demo-tenant", "demo-user", "callback-session", "assistant")
 
 	// 初始化
 	cfg := memory.DefaultConfig()
@@ -65,7 +66,7 @@ func main() {
 	// 1. 创建记忆 - 触发OnCreated
 	fmt.Println("1. 创建记忆...")
 	id1, _ := svc.Remember(ctx, memory.RememberRequest{
-		Namespace:  "test/callbacks",
+		NamespaceType: memory.NamespaceTransient,
 		Title:      "测试记忆",
 		Content:    "这是测试内容",
 		SourceType: memory.SourceUser,
@@ -83,7 +84,7 @@ func main() {
 	// 3. 创建另一个记忆然后删除 - 触发OnDeleted
 	fmt.Println("\n3. 创建并删除记忆...")
 	id2, _ := svc.Remember(ctx, memory.RememberRequest{
-		Namespace:  "test/callbacks",
+		NamespaceType: memory.NamespaceTransient,
 		Title:      "将被删除的记忆",
 		Content:    "这是临时内容",
 		SourceType: memory.SourceUser,
@@ -97,7 +98,7 @@ func main() {
 	fmt.Println("\n4. 创建带TTL的记忆...")
 	ttl := 2 // 2秒后过期
 	id3, _ := svc.Remember(ctx, memory.RememberRequest{
-		Namespace:  "test/callbacks",
+		NamespaceType: memory.NamespaceTransient,
 		Title:      "即将过期的记忆",
 		Content:    "这是临时内容",
 		TTLSeconds: &ttl,

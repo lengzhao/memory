@@ -121,10 +121,18 @@ func (de *DecisionEngine) FindSimilarMemories(ctx context.Context, candidate Ext
 		bm25Scores[r.ItemID] = r.BM25Score
 	}
 
+	query := de.db.WithContext(ctx).
+		Where("id IN ? AND status = ?", itemIDs, model.ItemStatusActive)
+	if isIsolationEnabled(ctx) {
+		meta, err := IsolationFromContext(ctx)
+		if err != nil {
+			return nil, err
+		}
+		query = query.Where("namespace IN ?", buildAllowedNamespaces(meta, []model.NamespaceType{candidate.Namespace}))
+	}
+
 	var items []model.MemoryItem
-	err = de.db.WithContext(ctx).
-		Where("id IN ? AND status = ?", itemIDs, model.ItemStatusActive).
-		Find(&items).Error
+	err = query.Find(&items).Error
 	if err != nil {
 		return nil, err
 	}
@@ -461,32 +469,25 @@ type ExecutionResult struct {
 }
 
 func (de *DecisionEngine) executeAdd(ctx context.Context, candidate ExtractedMemory) (string, error) {
-	now := time.Now()
-	item := model.MemoryItem{
-		ID:            model.GenerateID(),
-		Namespace:     fmt.Sprintf("%s/auto/%s", candidate.Namespace, time.Now().Format("20060102")),
+	svc := NewMemoryService(de.db)
+	return svc.Remember(ctx, RememberRequest{
 		NamespaceType: candidate.Namespace,
 		Title:         candidate.Title,
 		Content:       candidate.Content,
 		Summary:       candidate.Summary,
-		TagsJSON:      toJSON(candidate.Tags),
+		Tags:          candidate.Tags,
 		SourceType:    model.SourceTypeAgent,
 		Importance:    candidate.Importance,
 		Confidence:    candidate.Confidence,
-		Status:        model.ItemStatusActive,
-		CreatedAt:     now,
-		UpdatedAt:     now,
-		Version:       1,
-	}
-
-	if err := de.db.WithContext(ctx).Create(&item).Error; err != nil {
-		return "", err
-	}
-
-	return item.ID, nil
+	})
 }
 
 func (de *DecisionEngine) executeUpdate(ctx context.Context, targetID string, candidate ExtractedMemory, decision MemoryDecision) error {
+	query, err := de.scopedTargetQuery(ctx, targetID, candidate.Namespace)
+	if err != nil {
+		return err
+	}
+
 	updates := map[string]interface{}{
 		"content":    candidate.Content,
 		"title":      candidate.Title,
@@ -500,7 +501,7 @@ func (de *DecisionEngine) executeUpdate(ctx context.Context, targetID string, ca
 		updates["importance"] = decision.NewImportance
 	}
 
-	result := de.db.WithContext(ctx).Model(&model.MemoryItem{}).Where("id = ?", targetID).Updates(updates)
+	result := query.Updates(updates)
 	if result.Error != nil {
 		return result.Error
 	}
@@ -512,9 +513,16 @@ func (de *DecisionEngine) executeUpdate(ctx context.Context, targetID string, ca
 }
 
 func (de *DecisionEngine) executeDelete(ctx context.Context, targetID string) error {
-	result := de.db.WithContext(ctx).Model(&model.MemoryItem{}).
-		Where("id = ?", targetID).
-		Update("status", model.ItemStatusDeleted)
+	query := de.db.WithContext(ctx).Model(&model.MemoryItem{}).Where("id = ?", targetID)
+	if isIsolationEnabled(ctx) {
+		meta, err := IsolationFromContext(ctx)
+		if err != nil {
+			return err
+		}
+		query = query.Where("namespace IN ?", buildAllowedNamespaces(meta, nil))
+	}
+
+	result := query.Update("status", model.ItemStatusDeleted)
 
 	if result.Error != nil {
 		return result.Error
@@ -529,7 +537,11 @@ func (de *DecisionEngine) executeDelete(ctx context.Context, targetID string) er
 func (de *DecisionEngine) executeMerge(ctx context.Context, targetID string, candidate ExtractedMemory, decision MemoryDecision) (string, error) {
 	// Get existing memory
 	var existing model.MemoryItem
-	if err := de.db.WithContext(ctx).First(&existing, "id = ?", targetID).Error; err != nil {
+	scopedQuery, err := de.scopedTargetQuery(ctx, targetID, candidate.Namespace)
+	if err != nil {
+		return "", err
+	}
+	if err := scopedQuery.First(&existing).Error; err != nil {
 		return "", err
 	}
 
@@ -574,7 +586,11 @@ func (de *DecisionEngine) executeMerge(ctx context.Context, targetID string, can
 		updates["summary"] = candidate.Summary
 	}
 
-	result := de.db.WithContext(ctx).Model(&model.MemoryItem{}).Where("id = ?", targetID).Updates(updates)
+	updateQuery, err := de.scopedTargetQuery(ctx, targetID, candidate.Namespace)
+	if err != nil {
+		return "", err
+	}
+	result := updateQuery.Updates(updates)
 	if result.Error != nil {
 		return "", result.Error
 	}
@@ -596,6 +612,27 @@ func (de *DecisionEngine) executeMerge(ctx context.Context, targetID string, can
 	de.db.Create(&mergeRecord)
 
 	return targetID, nil
+}
+
+func (de *DecisionEngine) scopedTargetQuery(ctx context.Context, targetID string, nsType model.NamespaceType) (*gorm.DB, error) {
+	query := de.db.WithContext(ctx).
+		Model(&model.MemoryItem{}).
+		Where("id = ?", targetID)
+	if nsType != "" {
+		query = query.Where("namespace_type = ?", nsType)
+	}
+	if isIsolationEnabled(ctx) {
+		meta, err := IsolationFromContext(ctx)
+		if err != nil {
+			return nil, err
+		}
+		if nsType != "" {
+			query = query.Where("namespace IN ?", buildAllowedNamespaces(meta, []model.NamespaceType{nsType}))
+		} else {
+			query = query.Where("namespace IN ?", buildAllowedNamespaces(meta, nil))
+		}
+	}
+	return query, nil
 }
 
 // mergeContent intelligently merges two content strings

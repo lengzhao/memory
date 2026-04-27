@@ -13,11 +13,8 @@
 ### 基础功能（无需API Key）
 
 ```bash
-# 初始化数据库（在仓库根目录执行）
-go run examples/07_server_init/main.go
-
-# 数据库文件位置（默认工作目录下）
-./memory.db
+# 运行基础功能示例（会自动初始化数据库）
+go run examples/01_basic/main.go
 ```
 
 ### LLM自动提取（使用OpenAI API）
@@ -106,8 +103,8 @@ Total memories: 4
 
 ```
 memory/
-├── examples/           # 可执行示例（含 DB 初始化、LLM 完整演示等）
-│   ├── 07_server_init/ # 最简：Migrate + 插入/查询/FTS
+├── examples/           # 可执行示例（含隔离接入、LLM 提取等）
+│   ├── 01_basic/       # 基础使用（WithIsolation + Service API）
 │   └── 08_extract_demo/# 多轮对话 LLM 提取
 ├── model/              # GORM 模型（表结构单一来源）
 │   └── memory.go

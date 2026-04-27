@@ -16,6 +16,8 @@ import (
 )
 
 func main() {
+	ctx := service.WithIsolation(context.Background(), "demo-tenant", "demo-user", "extract-demo-session", "extractor")
+
 	cfg := store.DefaultConfig()
 	cfg.LogLevel = 2 // Warn level
 
@@ -61,7 +63,7 @@ func main() {
 			ResolutionContext: "",
 		}
 
-		result, err := extractor.Extract(context.Background(), req)
+		result, err := extractor.Extract(ctx, req)
 		if err != nil {
 			log.Printf("Extraction failed: %v", err)
 			continue

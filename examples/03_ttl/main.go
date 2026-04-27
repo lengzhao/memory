@@ -13,6 +13,7 @@ import (
 
 func main() {
 	ctx := context.Background()
+	ctx = memory.WithIsolation(ctx, "demo-tenant", "demo-user", "ttl-session", "assistant")
 
 	// 初始化
 	cfg := memory.DefaultConfig()
@@ -32,7 +33,6 @@ func main() {
 	fmt.Println("1. 创建会话上下文（5秒TTL）...")
 	sessionTTL := 5
 	sessionID, err := svc.Remember(ctx, memory.RememberRequest{
-		Namespace:     "session/active",
 		NamespaceType: memory.NamespaceTransient,
 		Title:         "当前会话",
 		Content:       "用户正在浏览产品页面",
@@ -48,7 +48,6 @@ func main() {
 	fmt.Println("\n2. 创建验证码（60秒TTL）...")
 	codeTTL := 60
 	codeID, err := svc.Remember(ctx, memory.RememberRequest{
-		Namespace:     "system/verification",
 		NamespaceType: memory.NamespaceTransient,
 		Title:         "验证码",
 		Content:       "验证码: 123456，用于登录验证",
@@ -65,7 +64,6 @@ func main() {
 	fmt.Println("\n3. 创建用户偏好（1小时TTL）...")
 	prefTTL := 3600 // 1小时
 	prefID, err := svc.Remember(ctx, memory.RememberRequest{
-		Namespace:     "user/temp-preferences",
 		NamespaceType: memory.NamespaceProfile,
 		Title:         "临时主题设置",
 		Content:       "用户选择了暗黑模式（实验性功能）",
@@ -81,7 +79,10 @@ func main() {
 	// 检查当前状态
 	fmt.Println("\n4. 当前活跃记忆...")
 	hits, _ := svc.Recall(ctx, memory.RecallRequest{
-		Namespaces: []string{"session/active", "system/verification", "user/temp-preferences"},
+		NamespaceTypes: []memory.NamespaceType{
+			memory.NamespaceTransient,
+			memory.NamespaceProfile,
+		},
 	})
 	fmt.Printf("   活跃记忆数量: %d\n", len(hits))
 	for _, hit := range hits {
@@ -108,7 +109,10 @@ func main() {
 	// 检查过期后状态
 	fmt.Println("\n7. 过期后的活跃记忆...")
 	hits, _ = svc.Recall(ctx, memory.RecallRequest{
-		Namespaces: []string{"session/active", "system/verification", "user/temp-preferences"},
+		NamespaceTypes: []memory.NamespaceType{
+			memory.NamespaceTransient,
+			memory.NamespaceProfile,
+		},
 	})
 	fmt.Printf("   活跃记忆数量: %d (会话应该已过期)\n", len(hits))
 	for _, hit := range hits {
@@ -136,7 +140,6 @@ func main() {
 	fmt.Println("\n9. 模拟滑动TTL（每3次访问续期）...")
 	slideTTL := 10
 	slideID, _ := svc.Remember(ctx, memory.RememberRequest{
-		Namespace:     "cache/data",
 		NamespaceType: memory.NamespaceTransient,
 		Title:         "缓存数据",
 		Content:       "频繁访问的查询结果",

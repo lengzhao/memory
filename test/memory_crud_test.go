@@ -17,7 +17,6 @@ func TestRemember_CreateMemory(t *testing.T) {
 	ctx := testContext()
 
 	req := memory.RememberRequest{
-		Namespace:     "test/crud",
 		NamespaceType: memory.NamespaceKnowledge,
 		Title:         "Test Title",
 		Content:       "This is test content",
@@ -37,7 +36,6 @@ func TestRemember_CreateMemory(t *testing.T) {
 
 	// Verify by recalling
 	hits, err := svc.Recall(ctx, memory.RecallRequest{
-		Namespaces: []string{"test/crud"},
 	})
 	if err != nil {
 		t.Fatalf("Failed to recall: %v", err)
@@ -60,7 +58,6 @@ func TestRemember_WithTTL(t *testing.T) {
 
 	ttl := 3600 // 1 hour
 	req := memory.RememberRequest{
-		Namespace:     "test/ttl",
 		NamespaceType: memory.NamespaceTransient,
 		Content:       "TTL test content",
 		TTLSeconds:    &ttl,
@@ -115,7 +112,6 @@ func TestRecall_ByQuery(t *testing.T) {
 
 	for _, content := range contents {
 		_, err := svc.Remember(ctx, memory.RememberRequest{
-			Namespace:     "test/fts",
 			NamespaceType: memory.NamespaceKnowledge,
 			Content:       content,
 		})
@@ -128,7 +124,6 @@ func TestRecall_ByQuery(t *testing.T) {
 	// Search for "programming"
 	hits, err := svc.Recall(ctx, memory.RecallRequest{
 		Query:      "programming",
-		Namespaces: []string{"test/fts"},
 		TopK:       10,
 	})
 	if err != nil {
@@ -157,7 +152,6 @@ func TestRecall_ByTags(t *testing.T) {
 
 	for i, tags := range tagSets {
 		_, err := svc.Remember(ctx, memory.RememberRequest{
-			Namespace:     "test/tags",
 			NamespaceType: memory.NamespaceKnowledge,
 			Content:       contents[i],
 			Tags:          tags,
@@ -169,7 +163,6 @@ func TestRecall_ByTags(t *testing.T) {
 
 	// Test TagsAny - should match any tag
 	hits, err := svc.Recall(ctx, memory.RecallRequest{
-		Namespaces: []string{"test/tags"},
 		TagsAny:    []string{"go"},
 	})
 	if err != nil {
@@ -181,7 +174,6 @@ func TestRecall_ByTags(t *testing.T) {
 
 	// Test TagsAll - should match all tags
 	hits, err = svc.Recall(ctx, memory.RecallRequest{
-		Namespaces: []string{"test/tags"},
 		TagsAll:    []string{"go", "programming"},
 	})
 	if err != nil {
@@ -202,7 +194,6 @@ func TestUpdate_Success(t *testing.T) {
 
 	// Create item
 	id, err := svc.Remember(ctx, memory.RememberRequest{
-		Namespace: "test/update",
 		Content:   "Original content",
 	})
 	if err != nil {
@@ -226,7 +217,6 @@ func TestUpdate_Success(t *testing.T) {
 
 	// Verify update
 	hits, _ := svc.Recall(ctx, memory.RecallRequest{
-		Namespaces: []string{"test/update"},
 	})
 	if hits[0].Content != newContent {
 		t.Errorf("Content not updated: got %q, want %q", hits[0].Content, newContent)
@@ -243,7 +233,6 @@ func TestUpdate_VersionConflict(t *testing.T) {
 
 	// Create item
 	id, err := svc.Remember(ctx, memory.RememberRequest{
-		Namespace: "test/conflict",
 		Content:   "Original content",
 	})
 	if err != nil {
@@ -292,7 +281,6 @@ func TestForget_Soft(t *testing.T) {
 
 	// Create item
 	id, err := svc.Remember(ctx, memory.RememberRequest{
-		Namespace: "test/forget",
 		Content:   "To be deleted",
 	})
 	if err != nil {
@@ -313,7 +301,6 @@ func TestForget_Soft(t *testing.T) {
 
 	// Verify not in active results
 	hits, err := svc.Recall(ctx, memory.RecallRequest{
-		Namespaces: []string{"test/forget"},
 	})
 	if err != nil {
 		t.Fatalf("Failed to recall: %v", err)
@@ -341,7 +328,6 @@ func TestForget_ByNamespace(t *testing.T) {
 	// Create multiple items in same namespace
 	for i := 0; i < 3; i++ {
 		_, err := svc.Remember(ctx, memory.RememberRequest{
-			Namespace: "test/ns-forget",
 			Content:   "Content",
 		})
 		if err != nil {
@@ -351,8 +337,8 @@ func TestForget_ByNamespace(t *testing.T) {
 
 	// Forget by namespace
 	count, err := svc.Forget(ctx, memory.ForgetRequest{
-		Namespace: "test/ns-forget",
-		Mode:      "soft",
+		NamespaceType: memory.NamespaceTransient,
+		Mode:          "soft",
 	})
 	if err != nil {
 		t.Fatalf("Failed to forget: %v", err)
@@ -363,7 +349,6 @@ func TestForget_ByNamespace(t *testing.T) {
 
 	// Verify all deleted
 	hits, _ := svc.Recall(ctx, memory.RecallRequest{
-		Namespaces: []string{"test/ns-forget"},
 	})
 	if len(hits) != 0 {
 		t.Errorf("Expected 0 hits, got %d", len(hits))
@@ -380,7 +365,6 @@ func TestTouch_AccessCount(t *testing.T) {
 
 	// Create item
 	id, err := svc.Remember(ctx, memory.RememberRequest{
-		Namespace: "test/touch",
 		Content:   "Content",
 	})
 	if err != nil {

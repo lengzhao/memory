@@ -22,7 +22,6 @@ func TestSummaryGenerator_GenerateItemSummary(t *testing.T) {
 			"The summary should capture the key points of this content."
 
 		id, _ := svc.Remember(ctx, RememberRequest{
-			Namespace:     "test/summary",
 			NamespaceType: model.NamespaceTypeKnowledge,
 			Content:       content,
 		})
@@ -61,14 +60,13 @@ func TestSummaryGenerator_GenerateNamespaceSummary(t *testing.T) {
 		// Create multiple items
 		for i := 0; i < 3; i++ {
 			svc.Remember(ctx, RememberRequest{
-				Namespace:     "test/ns-summary",
 				NamespaceType: model.NamespaceTypeKnowledge,
 				Title:         "Item " + string(rune('A'+i)),
 				Content:       "Content " + string(rune('1'+i)),
 			})
 		}
 
-		summary, err := sum.GenerateNamespaceSummary(ctx, "test/ns-summary")
+		summary, err := sum.GenerateNamespaceSummary(ctx, "knowledge/default")
 		if err != nil {
 			t.Fatalf("GenerateNamespaceSummary failed: %v", err)
 		}
@@ -78,7 +76,7 @@ func TestSummaryGenerator_GenerateNamespaceSummary(t *testing.T) {
 
 		// Verify stored in database
 		var ns model.NamespaceSummary
-		db.First(&ns, "namespace = ?", "test/ns-summary")
+		db.First(&ns, "namespace = ?", "knowledge/default")
 		if ns.Summary == "" {
 			t.Fatal("Expected namespace summary to be stored")
 		}
@@ -90,13 +88,12 @@ func TestSummaryGenerator_GenerateNamespaceSummary(t *testing.T) {
 	t.Run("update existing summary", func(t *testing.T) {
 		// Add more items
 		svc.Remember(ctx, RememberRequest{
-			Namespace:     "test/ns-summary",
 			NamespaceType: model.NamespaceTypeKnowledge,
 			Title:         "Item D",
 			Content:       "Content D",
 		})
 
-		summary, err := sum.GenerateNamespaceSummary(ctx, "test/ns-summary")
+		summary, err := sum.GenerateNamespaceSummary(ctx, "knowledge/default")
 		if err != nil {
 			t.Fatalf("GenerateNamespaceSummary failed: %v", err)
 		}
@@ -106,7 +103,7 @@ func TestSummaryGenerator_GenerateNamespaceSummary(t *testing.T) {
 
 		// Verify count updated
 		var ns model.NamespaceSummary
-		db.First(&ns, "namespace = ?", "test/ns-summary")
+		db.First(&ns, "namespace = ?", "knowledge/default")
 		if ns.ItemCount != 4 {
 			t.Fatalf("Expected updated count 4, got %d", ns.ItemCount)
 		}

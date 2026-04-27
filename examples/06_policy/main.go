@@ -13,6 +13,10 @@ import (
 
 func main() {
 	ctx := context.Background()
+	ctx = memory.WithIsolation(ctx, "demo-tenant", "demo-user", "policy-session", "assistant")
+
+	actionNS := "tenant/demo-tenant/user/demo-user/action"
+	knowledgeNS := "tenant/demo-tenant/user/demo-user/knowledge"
 
 	// 初始化
 	cfg := memory.DefaultConfig()
@@ -65,10 +69,10 @@ func main() {
 	// 3. 为特定namespace设置自定义策略
 	fmt.Println("2. 为特定项目设置自定义策略：")
 
-	// 为项目A的任务设置更短的TTL（任务需要更频繁清理）
+	// 为当前 action namespace 设置更短的TTL（任务需要更频繁清理）
 	projectATTL := 7 * 24 * 3600 // 7天
 	projectAPolicy := model.NamespacePolicy{
-		Namespace:                 "action/project-a",
+		Namespace:                 actionNS,
 		TTLSeconds:                &projectATTL,
 		TTLPolicy:                 model.TTLPolicyFixed,
 		SummaryEnabled:            true,
@@ -80,11 +84,11 @@ func main() {
 	if err := pm.SetPolicy(ctx, projectAPolicy); err != nil {
 		log.Fatal(err)
 	}
-	fmt.Println("   ✓ 为 action/project-a 设置了7天TTL策略")
+	fmt.Printf("   ✓ 为 %s 设置了7天TTL策略\n", actionNS)
 
-	// 为高优先级知识库设置永不过期
+	// 为当前 knowledge namespace 设置永不过期
 	kbVIPPolicy := model.NamespacePolicy{
-		Namespace:                 "knowledge/vip",
+		Namespace:                 knowledgeNS,
 		TTLSeconds:                nil, // 永不过期
 		TTLPolicy:                 model.TTLPolicyManual,
 		SummaryEnabled:            true,
@@ -96,7 +100,7 @@ func main() {
 	if err := pm.SetPolicy(ctx, kbVIPPolicy); err != nil {
 		log.Fatal(err)
 	}
-	fmt.Println("   ✓ 为 knowledge/vip 设置了永不过期策略（强调FTS搜索）")
+	fmt.Printf("   ✓ 为 %s 设置了永不过期策略（强调FTS搜索）\n", knowledgeNS)
 
 	// 4. 使用自定义策略创建记忆
 	fmt.Println("\n3. 使用自定义策略创建记忆：")
@@ -104,7 +108,6 @@ func main() {
 
 	// 为project-a创建任务（会应用我们设置的7天TTL）
 	taskID, err := svc.Remember(ctx, memory.RememberRequest{
-		Namespace:     "action/project-a",
 		NamespaceType: memory.NamespaceAction,
 		Title:         "项目A的紧急任务",
 		Content:       "需要在一周内完成API接口开发",
@@ -114,11 +117,10 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	fmt.Printf("   创建任务: %s (应用project-a的7天TTL策略)\n", taskID)
+	fmt.Printf("   创建任务: %s (应用 action namespace 的7天TTL策略)\n", taskID)
 
-	// 为vip知识库创建知识（永不过期）
+	// 为knowledge创建知识（永不过期）
 	kbID, err := svc.Remember(ctx, memory.RememberRequest{
-		Namespace:     "knowledge/vip",
 		NamespaceType: memory.NamespaceKnowledge,
 		Title:         "VIP客户信息",
 		Content:       "重要客户的关键业务信息",
@@ -128,11 +130,10 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	fmt.Printf("   创建知识: %s (应用vip的永不过期策略)\n", kbID)
+	fmt.Printf("   创建知识: %s (应用 knowledge namespace 的永不过期策略)\n", kbID)
 
-	// 为普通knowledge创建知识（使用默认策略 - 永不过期但不同权重）
+	// 再创建一条knowledge（同namespace，使用同策略）
 	normalKbID, err := svc.Remember(ctx, memory.RememberRequest{
-		Namespace:     "knowledge/general",
 		NamespaceType: memory.NamespaceKnowledge,
 		Title:         "一般知识点",
 		Content:       "普通的知识条目",
@@ -142,7 +143,7 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	fmt.Printf("   创建知识: %s (使用knowledge默认策略)\n", normalKbID)
+	fmt.Printf("   创建知识: %s (同namespace策略)\n", normalKbID)
 
 	// 5. 验证策略应用
 	fmt.Println("\n4. 验证策略已正确应用：")
@@ -164,11 +165,11 @@ func main() {
 	// 6. 获取精确匹配的策略
 	fmt.Println("\n5. 获取精确匹配的策略：")
 
-	customPolicy, _ := pm.GetPolicy(ctx, "action/project-a")
-	fmt.Printf("   action/project-a: TTL=%d秒\n", *customPolicy.TTLSeconds)
+	customPolicy, _ := pm.GetPolicy(ctx, actionNS)
+	fmt.Printf("   %s: TTL=%d秒\n", actionNS, *customPolicy.TTLSeconds)
 
 	defaultPolicy, _ := pm.GetPolicy(ctx, "action/other-project")
-	fmt.Printf("   action/other-project: 使用默认策略 TTL=%d秒\n", *defaultPolicy.TTLSeconds)
+	fmt.Printf("   action/other-project: 仍可读取默认策略 TTL=%d秒\n", *defaultPolicy.TTLSeconds)
 
 	fmt.Println("\n=== 示例完成 ===")
 	fmt.Println("\nPolicyManager使用场景：")
