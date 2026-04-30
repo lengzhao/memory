@@ -226,16 +226,6 @@ func (FTSMemory) IsVirtualTable() bool {
 
 // ==================== LLM Integration (v0.3) ====================
 
-// LLMProvider defines the supported LLM providers
-type LLMProvider string
-
-const (
-	LLMProviderOpenAI LLMProvider = "openai"
-	LLMProviderClaude LLMProvider = "anthropic"
-	LLMProviderOllama LLMProvider = "ollama"
-	LLMProviderCustom LLMProvider = "custom"
-)
-
 // ExtractionStatus defines the status of dialog extraction
 type ExtractionStatus string
 
@@ -249,7 +239,6 @@ const (
 // LLMConfig stores runtime LLM provider configuration.
 // This config is passed in code and is NOT persisted by this library.
 type LLMConfig struct {
-	Provider       LLMProvider
 	APIKey         string // Plaintext - caller handles encryption/decryption if needed
 	BaseURL        *string
 	Model          string

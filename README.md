@@ -36,7 +36,7 @@ go run examples/08_extract_demo/main.go
 export OPENAI_API_KEY=sk-your-api-key
 
 # 可选（有默认值）
-export OPENAI_MODEL=gpt-4o        # 默认模型 (gpt-4o/gpt-4/gpt-3.5-turbo)
+export OPENAI_MODEL=gpt-5.4-nano  # 默认模型 (gpt-5.4-nano/gpt-4o/gpt-4)
 export OPENAI_BASE_URL=            # 自定义API端点（如 Azure OpenAI）
 export OPENAI_TEMPERATURE=0.3      # 温度参数（0-1，越低越稳定）
 export OPENAI_TIMEOUT=30           # API超时时间（秒）
@@ -132,7 +132,7 @@ memory/
 - ✅ **全文搜索**：FTS5 虚表 + 自动同步触发器
 - ✅ **策略持久化**：`namespace_policies` 表存储配置
 - ✅ **事件追踪**：审计日志 (`memory_events`)
-- ✅ **LLM 集成**：多 Provider（OpenAI/Claude/Ollama）
+- ✅ **LLM 集成**：OpenAI 兼容接口（可通过 `OPENAI_BASE_URL` 对接兼容端点，如 Ollama）
 - ✅ **自动提取**：对话内容分类到上述 4 类 namespace
 
 ## 数据模型
@@ -149,9 +149,9 @@ memory/
 | `deleted_items` | 软删恢复表 |
 | `memory_merges` | 合并操作记录（决策引擎） |
 | `fts_memory` | FTS5 全文搜索虚表（由 `Migrate` 创建） |
-| `llm_configs` | LLM Provider 配置（`api_key` 由调用方自行加解密后存储） |
-| `extraction_prompts` | 提取 Prompt 模板 |
 | `dialog_extractions` | 对话提取记录（幂等检测） |
+
+> 说明：`LLMConfig` 和 `ExtractionPrompt` 当前为运行时配置结构体（代码传入），不作为持久化表自动创建。
 
 详见 `model/memory.go` 与 `docs/memory.md`。
 

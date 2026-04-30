@@ -130,7 +130,7 @@ flowchart LR
 - `updated_at` DATETIME NOT NULL
 
 #### `namespace_policies`（策略持久化）
-- `namespace` TEXT PK（或前缀匹配如 `action/projA/*`）
+- `namespace` TEXT PK（当前实现为精确匹配，未实现通配符前缀）
 - `ttl_seconds` INTEGER NULL（NULL表示不过期）
 - `ttl_policy` TEXT DEFAULT 'fixed'（fixed|sliding|manual）
 - `sliding_ttl_threshold` INTEGER DEFAULT 3（滑动TTL触发阈值：访问N次续期）
@@ -141,7 +141,7 @@ flowchart LR
 - `created_at` DATETIME NOT NULL
 - `updated_at` DATETIME NOT NULL
 
-> 策略匹配优先级：精确匹配 > 前缀最长匹配 > 类型默认（transient/action/profile/knowledge）> 全局默认
+> 策略匹配优先级：精确匹配 > 类型默认（transient/action/profile/knowledge）> 全局默认
 
 #### `memory_events`（审计/可回放/追踪）
 - `id` TEXT PK
@@ -247,500 +247,87 @@ sequenceDiagram
 
 ---
 
-## 8. API 设计（Go 服务接口）
+## 8. API 设计（当前实现）
+
+以下接口与 `service/memory.go`、`service/extractor.go` 保持一致。
 
 ### 8.1 核心接口
-- `Remember(req) (itemID, error)`
-  - 支持 `dedupe_key` 幂等写入（相同namespace+dedupe_key返回已有item_id）
-  - 支持 `request_id` 全局幂等（48小时内重复请求返回相同结果）
-- `Update(req) error`
-  - 乐观锁：必须提供 `expected_version`，冲突返回 `ErrConflict`（建议重试或合并）
-- `Recall(req) ([]MemoryHit, error)`
-  - 支持上下文预算控制：`token_budget` / `max_chars` / `max_items`
-  - 返回结构化评分解释：`score_breakdown`
-- `Forget(req) (count, error)`
-  - 模式：`soft_delete`（移至deleted_items）/ `expire`（标记过期）/ `immediate_purge`（危险）
-- `Restore(itemID)`（从deleted_items恢复）
-- `Touch(itemID)`（访问计数、最近访问、sliding TTL续期检查）
-- `SummarizeNamespace(namespace)`（手动触发）
-- `ListNamespaces(prefix)`（层级浏览）
-- `SetNamespacePolicy(policy)`（TTL/summary策略持久化到表）
-- **运维接口**：
-  - `RebuildFTS() (stats, error)`（全量重建FTS索引 + 校验计数）
-  - `ValidateFTS() (bool, error)`（校验FTS与主表计数一致）
-  - `PurgeDeleted(before time) (count, error)`（清理超期软删数据）
+- `Remember(ctx, req) (itemID string, err error)`
+  - 支持 `dedupe_key`（同 `namespace` 下幂等）
+- `Update(ctx, req) error`
+  - 需要 `ExpectedVersion` 做乐观锁检查
+- `Recall(ctx, req) ([]MemoryHit, error)`
+  - 支持 query/namespace/tag/time/confidence/importance 过滤
+- `List(ctx, req) ([]MemoryItem, error)`
+  - 按 `created_at` 分页和排序
+- `Forget(ctx, req) (count int, err error)`
+  - `mode` 支持 `soft` / `hard` / `expire`
+- `Touch(ctx, itemID) error`
+- `TouchWithRenew(ctx, itemID, threshold, ttlSeconds) (renewed bool, err error)`
+- `RenewExpiration(ctx, itemID, ttlSeconds) error`
+- `CleanupExpired(ctx) (count int64, err error)`
+- `PurgeDeleted(ctx, before time.Time) (count int64, err error)`
+- `RebuildFTS(ctx) error`
 
-### 8.2 Recall 请求结构（建议）
-- `query`：关键词
-- `namespaces[]`：指定 namespace 或前缀
-- `namespace_types[]`
-- `tags_any[]` / `tags_all[]`
-- `time_range`
-- `include_expired`（默认 false）
-- `include_deleted`（默认 false，仅管理员）
-- `top_k`
-- `context_budget`：上下文预算（`token_budget` 或 `max_chars` 或 `max_items`，三选一）
-- `min_confidence`
-- `min_importance`
-- `request_id`：用于幂等和事件追踪
+### 8.2 Recall 返回字段（当前实现）
+- `MemoryHit` 包含：
+  - `Score`
+  - `FTSScore`
+  - `RecencyScore`
+  - `ImportanceScore`
+  - `ConfidenceScore`
+  - `MatchReasons`
 
-### 8.3 Recall 返回结构（建议）
-- `item_id`
-- `namespace`
-- `title`
-- `snippet`
-- `score`（最终综合分数，0-1）
-- `score_breakdown`（结构化评分解释）：
-  - `fts_score`: 0-1（BM25归一化）
-  - `recency_score`: 0-1（时间衰减）
-  - `importance_score`: 0-1（重要性归一化）
-  - `confidence_score`: 0-1（置信度）
-  - `access_boost`: 0-0.1（访问频率加成）
-- `reason_codes[]`（命中原因标签）：`title_match`/`content_match`/`tag_match`/`recent_access`/`high_importance`
-- `conflict_warning`（存在冲突记忆的警告标识）
-- `expires_at`
-- `source_ref`
-- `token_count`（该条目的token数，用于预算管理）
+> 当前实现没有 `score_breakdown`、`reason_codes`、`conflict_warning`、`context_budget` 等扩展字段。
 
 ---
 
-## 9. 排序与召回策略（无向量版）
+## 9. 排序与召回策略（当前实现）
 
-### 9.1 综合分数计算（可配置权重）
+排序公式：
 
 `final_score = w_fts*fts_score + w_recency*recency_score + w_importance*importance_score + w_confidence*confidence_score + access_boost`
 
-- `fts_score`：FTS BM25（归一化到0-1）
-- `recency_score`：时间衰减（transient/action 更敏感，使用指数衰减 `exp(-λ*Δt)`）
-- `importance_score`：`importance/100`
-- `confidence_score`：`confidence`（低置信记忆降权）
-- `access_boost`：`min(0.1, access_count/100)`（高频访问微调加成）
-
-**默认权重**（可通过`namespace_policies.rank_weights_json`覆盖）：
-- `w_fts = 0.55`
-- `w_recency = 0.20`
-- `w_importance = 0.15`
-- `w_confidence = 0.10`
-
-### 9.2 冲突处理策略
-- 检测到`contradicts`链接时，标记冲突但默认不自动过滤
-- Recall返回增加`conflict_warning`字段
-- 调用方可选择：`prefer_latest`（取更新时间最新）/ `prefer_high_confidence`（取高置信度）/ `return_all`（返回全部冲突项）
-
-### 9.3 FTS 维护与校验
-- **自动同步**：通过SQLite trigger保持`memory_items`与`fts_memory`同步
-- **重建命令**：`RebuildFTS()`全量重建（schema变化或数据不一致时）
-- **校验机制**：`ValidateFTS()`比对主表与FTS表计数，不一致则告警并触发重建
-- **监控指标**：FTS延迟（trigger执行时间）、重建耗时、校验失败次数
+- `access_boost = min(0.1, access_count/100)`
+- 默认权重：`0.55 / 0.20 / 0.15 / 0.10`
+- 可通过 `namespace_policies.rank_weights_json` 覆盖
 
 ---
 
-## 10. 配置项（建议）
+## 10. LLM 集成与自动提取（当前实现）
 
-`config.yaml` 示例字段（逻辑）：
-- `db.path`
-- `db.wal_enabled`（true，性能优先）
-- `expiry.mode` (`soft`/`hard`/`immediate_purge`)
-- `expiry.gc_interval`
-- `expiry.purge_after_days`（软删保留天数，默认7）
-- `expiry.max_sliding_extensions`（最大滑动续期次数，默认10）
-- `summary.enabled`
-- `summary.item_token_threshold`
-- `summary.namespace_batch_size`
-- `recall.default_top_k`
-- `recall.namespace_priority`
-- `recall.default_context_budget`（默认token预算）
-- `recall.max_context_budget`（最大预算上限）
-- `ttl.default_by_namespace_type`（各类型默认策略）
-- `concurrency.optimistic_lock_retries`（乐观锁冲突重试次数，默认3）
-- `idempotency.request_id_ttl_hours`（request_id幂等窗口，默认48）
-- `fts.auto_rebuild_on_mismatch`（校验失败自动重建，默认true）
-- `fts.rebuild_timeout_minutes`
+### 10.1 能力范围
+- 提供 `Extractor.Extract(ctx, req)` 与 `QuickExtract(...)`
+- 运行时使用 `LLMConfig`（代码传入，不落库）
+- 使用 OpenAI 兼容 Chat Completions 接口
+- 可通过 `OPENAI_BASE_URL` 对接兼容端点（如 Ollama）
+
+### 10.2 相关数据
+- `DialogExtraction` 表用于记录提取过程与缓存（48 小时窗口）
+- `ExtractionPrompt` 为运行时结构体（代码传入，不落库）
+
+### 10.3 ExtractRequest 关键字段
+- `DialogText`
+- `MinConfidence`
+- `DryRun`
+- `UseDecisionEngine`
+- `SimilarTopK`
+- `ReferenceTime` / `TimeZone` / `ResolutionContext`
+- `LLMConfig`（必需）
+- `ExtractionPrompt`（可选，空则使用内建默认）
 
 ---
 
 ## 11. Repo 布局（与实现仓库对齐）
 
-本仓库为库形态：`github.com/lengzhao/memory`。表结构以 **`model` 包 GORM 标签为唯一事实来源**；`store.Migrate` 内部执行 `AutoMigrate` 并安装 FTS5 虚表与触发器。无独立 `migrations/*.sql` 目录。
+本仓库为库形态：`github.com/lengzhao/memory`。表结构以 `model` 包 GORM 标签为准；`store.Migrate` 执行 `AutoMigrate` 并安装 FTS5 虚表与触发器。
 
 ```text
 memory/
-  examples/     # 可执行示例
-  model/        # 表定义
+  examples/
+  model/
   service/
-  store/        # InitDB、Migrate、FTS5 安装
+  store/
   test/
   docs/
 ```
-
----
-
-## 12. 里程碑（建议）
-
-### M1（1-2周）核心存储与基础API
-- SQLite schema 由 GORM `AutoMigrate` + `store` 中 FTS5 安装（`namespace_policies`、`deleted_items`、事件表等）
-- Remember/Recall/Forget 基础功能（含dedupe_key幂等、request_id幂等窗口）
-- FTS5 检索 + namespace 过滤 + trigger自动同步
-- **并发控制**：乐观锁实现（Update接口 + version字段校验）
-- 软过期 + 可恢复删除机制
-
-### M2（第3周）智能排序与摘要
-- Summary Worker（item + namespace）
-- **排序增强**：结构化评分解释（score_breakdown + reason_codes）
-- **滑动TTL实现**：访问续期逻辑 + sliding_ttl_threshold
-- 事件审计表（含actor/trace_id/request_id追踪）
-- **FTS维护**：RebuildFTS/ValidateFTS运维接口
-
-### M3（第4周）策略配置与可靠性
-- **策略配置中心**：namespace_policies表 + SetNamespacePolicy接口
-- 压测与数据恢复（备份/恢复 + RPO/RTO验证）
-- **并发测试**：10并发写入压力测试 + 幂等性验证
-- 接入 OpenClaw Agent 工具调用
-- **监控指标**：FTS延迟、校验失败率、TTL续期统计
-
----
-
-## 13. 验收标准（Definition of Done）
-
-### 13.1 功能验收
-- 多 namespace 分层查询可用
-- 过期后默认不可召回，**支持从`deleted_items`恢复**
-- summary 自动生成并可被召回展示
-- **并发更新**：乐观锁冲突时能正确返回错误码，支持重试
-- **幂等写入**：相同`dedupe_key`或`request_id`重复调用返回相同结果，不重复写入
-- **Recall可解释性**：返回`score_breakdown`和`reason_codes`，便于调参和问题排查
-- **Sliding TTL**：高频访问的transient记忆能自动续期，不机械过期
-- **FTS可靠性**：校验失败时自动重建，重建后数据一致
-
-### 13.2 性能与可靠性
-- 10 万条本地数据下 Recall P95 < 150ms（单机基线目标）
-- 1万条写入/小时下，FTS同步延迟 P99 < 10ms
-- WAL模式崩溃恢复后数据一致性验证通过
-- **RPO/RTO目标**：`RPO <= 5min`（WAL + 定期快照），`RTO <= 15min`
-
-### 13.3 测试与可观测
-- API 单元测试覆盖核心路径（>80% 逻辑覆盖）
-- **并发测试**：模拟10并发写入同一namespace，验证无丢失/覆盖
-- **幂等测试**：重复request_id请求，验证返回相同item_id
-- **事件追踪验证**：通过`memory_events`能完整回放任意记忆的生命周期
-- **FTS校验**：主表与FTS表计数差异为0
-
----
-
-## 14. LLM集成与自动提取（v0.3）
-
-### 14.1 目标
-- 支持配置多个 LLM Provider（OpenAI、Claude、本地模型等）
-- 用户输入对话，系统自动提取记忆并分类到不同 namespace
-- 使用结构化输出（JSON Mode）确保提取结果可直接写入数据库
-
-### 14.2 架构增强
-
-```mermaid
-flowchart LR
-    A[User Dialog] --> B[Dialog Service]
-    B --> C[Memory Extractor]
-    C --> D[LLM Client]
-    D --> E[(LLM Provider)]
-    C --> F[Namespace Classifier]
-    F --> G{分类结果}
-    G -->|transient| H[临时上下文]
-    G -->|profile| I[用户画像]
-    G -->|action| J[任务行动]
-    G -->|knowledge| K[知识库]
-    H --> N[(SQLite)]
-    I --> N
-    J --> N
-    K --> N
-```
-
-### 14.3 数据模型扩展
-
-#### `llm_configs`（LLM配置表）
-- `id` TEXT PK
-- `name` TEXT NOT NULL（配置名称，如 "openai-gpt4"）
-- `provider` TEXT NOT NULL（openai/anthropic/ollama/custom）
-- `api_key` TEXT（加密存储）
-- `base_url` TEXT NULL（自定义API端点）
-- `model` TEXT NOT NULL（模型ID，如 "gpt-4o"）
-- `max_tokens` INTEGER DEFAULT 4096
-- `temperature` REAL DEFAULT 0.3（提取任务需要稳定输出）
-- `timeout_seconds` INTEGER DEFAULT 30
-- `is_default` BOOLEAN DEFAULT 0
-- `enabled` BOOLEAN DEFAULT 1
-- `created_at` DATETIME NOT NULL
-- `updated_at` DATETIME NOT NULL
-
-#### `extraction_prompts`（提取Prompt模板）
-- `id` TEXT PK
-- `name` TEXT NOT NULL（模板名称）
-- `version` INTEGER DEFAULT 1
-- `system_prompt` TEXT NOT NULL
-- `json_schema` TEXT NOT NULL（结构化输出schema）
-- `is_default` BOOLEAN DEFAULT 0
-- `created_at` DATETIME NOT NULL
-- `updated_at` DATETIME NOT NULL
-
-#### `dialog_extractions`（提取记录）
-- `id` TEXT PK
-- `dialog_text` TEXT NOT NULL（原始对话内容）
-- `dialog_hash` TEXT NOT NULL（用于幂等检测）
-- `llm_config_id` TEXT NOT NULL
-- `prompt_id` TEXT NOT NULL
-- `extracted_memories_json` TEXT NOT NULL（提取结果数组）
-- `total_tokens` INTEGER
-- `processing_time_ms` INTEGER
-- `status` TEXT（pending/processing/completed/failed）
-- `error_message` TEXT
-- `created_at` DATETIME NOT NULL
-
-### 14.4 分类策略（4 类 namespace）
-
-LLM提取器需要判断每条记忆属于哪类：
-
-| Namespace | 分类规则 | 示例 | 默认TTL |
-|-----------|----------|------|---------|
-| `transient` | 当前会话上下文，临时信息，短期有效 | "用户刚才说要去吃饭"、"刚才讨论了项目进度" | sliding 3天 |
-| `profile` | 用户偏好、个人信息、长期画像 | "用户喜欢深色主题"、"用户是产品经理" | manual |
-| `action` | 任务、待办、行动项、有截止日期 | "完成Q3报告"、"修复登录bug" | fixed 90天 |
-| `knowledge` | 知识、技能、流程、学到的信息 | "Go的goroutine原理"、"用pprof分析性能"、"部署SOP" | manual |
-
-### 14.5 提取Prompt设计
-
-**系统Prompt示例**：
-```
-你是一个记忆提取助手。分析以下对话，提取有价值的记忆信息。
-
-CLASSIFICATION RULES (4 categories):
-- transient: 临时会话上下文，短期有效，会话结束后逐渐失效
-- profile: 用户画像，长期稳定的个人偏好和信息
-- action: 需要执行的任务、待办、行动项，有明确目标或截止
-- knowledge: 学到的知识、技能、方法、流程
-
-对于每条记忆，请输出：
-1. namespace: 只能是 transient/profile/action/knowledge 之一
-2. title: 简短的标题（10字以内）
-3. content: 详细内容
-4. summary: 一句话摘要
-5. tags: 相关标签数组
-6. importance: 重要性 0-100
-7. confidence: 置信度 0.0-1.0
-8. reasoning: 分类理由
-
-如果是 action，额外提取：
-- deadline: ISO日期或null
-- priority: high/medium/low
-
-返回严格的JSON格式: {"memories": [...]}
-```
-
-**JSON Schema示例**：
-```json
-{
-  "type": "object",
-  "properties": {
-    "memories": {
-      "type": "array",
-      "items": {
-        "type": "object",
-        "properties": {
-          "namespace": {"enum": ["transient", "profile", "action", "knowledge"]},
-          "title": {"type": "string", "maxLength": 50},
-          "content": {"type": "string"},
-          "summary": {"type": "string"},
-          "tags": {"type": "array", "items": {"type": "string"}},
-          "importance": {"type": "integer", "minimum": 0, "maximum": 100},
-          "confidence": {"type": "number", "minimum": 0, "maximum": 1},
-          "reasoning": {"type": "string"},
-          "task_metadata": {
-            "type": "object",
-            "properties": {
-              "deadline": {"type": "string", "format": "date"},
-              "priority": {"enum": ["high", "medium", "low"]}
-            }
-          }
-        },
-        "required": ["namespace", "title", "content", "importance", "confidence"]
-      }
-    }
-  },
-  "required": ["memories"]
-}
-```
-
-### 14.6 API设计
-
-#### 对话提取接口
-```go
-// ExtractRequest 对话提取请求
-type ExtractRequest struct {
-    DialogText    string            // 原始对话文本
-    LLMConfigID   string            // 使用哪个LLM配置（空则使用default）
-    PromptID      string            // 使用哪个prompt模板（空则使用default）
-    ContextMemories []string        // 相关记忆ID，作为上下文
-    MinConfidence float64           // 最低置信度阈值（默认0.7）
-    DryRun        bool              // 仅预览，不写入数据库
-}
-
-// ExtractResult 提取结果
-type ExtractResult struct {
-    ExtractionID   string
-    Status         string
-    Memories       []ExtractedMemory
-    TotalTokens    int
-    ProcessingTime int // ms
-}
-
-// ExtractedMemory 提取的单条记忆
-type ExtractedMemory struct {
-    TempID      string          // 预览用，正式写入后替换为真实ID
-    Namespace   string
-    Title       string
-    Content     string
-    Summary     string
-    Tags        []string
-    Importance  int
-    Confidence  float64
-    Reasoning   string
-    TTLSeconds  *int            // 可选，覆盖默认策略
-}
-```
-
-#### LLM配置管理接口
-```go
-type LLMConfigService interface {
-    CreateConfig(cfg LLMConfig) (id string, err error)
-    UpdateConfig(id string, cfg LLMConfig) error
-    DeleteConfig(id string) error
-    GetConfig(id string) (LLMConfig, error)
-    ListConfigs() ([]LLMConfig, error)
-    SetDefault(id string) error
-    TestConfig(id string) (latencyMs int, err error)  // 测试连通性
-}
-```
-
-### 14.7 流程图
-
-```mermaid
-sequenceDiagram
-    participant U as User
-    participant DS as DialogService
-    participant EX as Extractor
-    participant LLM as LLMClient
-    participant MS as MemoryService
-    participant DB as SQLite
-
-    U->>DS: 输入对话文本
-    DS->>DS: 计算dialog_hash
-    DS->>DB: 查重（48小时窗口）
-    alt 已存在
-        DB-->>DS: 返回已有extraction
-        DS-->>U: 返回结果（幂等）
-    else 新对话
-        DS->>EX: Extract(req)
-        EX->>DB: 加载LLM配置
-        EX->>DB: 加载Prompt模板
-        EX->>LLM: 调用LLM API
-        LLM-->>EX: JSON数组结果
-        EX->>EX: 验证schema
-        EX->>EX: 过滤低置信度
-        EX->>MS: 批量写入记忆
-        loop 每条记忆
-            MS->>MS: 查dedupe_key
-            alt 存在
-                MS->>MS: 合并或跳过
-            else 新记忆
-                MS->>DB: INSERT memory_items
-                MS->>DB: INSERT fts_memory (via trigger)
-                MS->>DB: INSERT memory_events
-            end
-        end
-        EX->>DB: 保存extraction记录
-        EX-->>DS: ExtractResult
-        DS-->>U: 提取的记忆列表
-    end
-```
-
-### 14.8 关键实现点
-
-#### 1. LLM Client 抽象
-```go
-type LLMClient interface {
-    Complete(ctx context.Context, req CompletionRequest) (CompletionResponse, error)
-    CompleteStructured(ctx context.Context, req StructuredRequest) (StructuredResponse, error)
-}
-
-// 实现：OpenAIClient, ClaudeClient, OllamaClient
-```
-
-#### 2. 提取后处理
-- **置信度过滤**：低于 `min_confidence` 的记忆丢弃或标记待确认
-- **去重检测**：使用 `dedupe_key` 检测同 namespace 内相似内容
-- **冲突检测**：检查是否 contradicts 现有记忆，创建 memory_links
-- **TTL 应用**：根据 namespace 类型应用 policy 中的 TTL 设置
-
-#### 3. 成本优化
-- **缓存**：相同 `dialog_hash` 48小时内直接返回缓存结果
-- **Token预算**：提取请求可设置 `max_tokens` 限制
-- **批量提取**：累积多条短对话后一次性提取
-
-### 14.9 配置示例
-
-```yaml
-llm:
-  default_config: "openai-gpt4o"
-  configs:
-    - id: "openai-gpt4o"
-      provider: "openai"
-      api_key: "${OPENAI_API_KEY}"
-      model: "gpt-4o"
-      temperature: 0.3
-      max_tokens: 4096
-    - id: "ollama-local"
-      provider: "ollama"
-      base_url: "http://localhost:11434"
-      model: "llama3.1:8b"
-      temperature: 0.2
-
-extraction:
-  min_confidence: 0.7
-  cache_ttl_hours: 48
-  batch_size: 5  # 累积5条消息再提取
-  default_prompt: "v1-standard"
-```
-
-### 14.10 验收标准
-
-- [ ] 支持至少3种LLM Provider（OpenAI、Claude、Ollama）
-- [ ] 对话提取准确率 > 80%（人工抽检100条）
-- [ ] 分类到4类namespace的准确率 > 90%
-- [ ] 48小时内相同对话哈希返回缓存（幂等）
-- [ ] 支持dry-run模式预览提取结果
-- [ ] 提取失败时记录详细错误到 `dialog_extractions.error_message`
-
----
-
-## 附录：v0.1 → v0.2 变更摘要
-
-| 模块 | v0.1 状态 | v0.2 改进 |
-|------|-----------|-----------|
-| **并发控制** | 仅有`version`字段 | 乐观锁协议 + `ErrConflict`错误码 + 重试策略 |
-| **幂等写入** | 无 | `dedupe_key`（namespace内唯一）+ `request_id`（全局48小时窗口） |
-| **TTL策略** | 仅fixed | 新增`sliding`（访问续期）+ `manual`（永不过期）+ 续期阈值保护 |
-| **删除机制** | soft_expire标记 | `deleted_items`表软删 + `purge_after`可恢复 + 物理清理 |
-| **评分解释** | `reason`字符串 | `score_breakdown`结构化JSON + `reason_codes[]`标签 |
-| **策略配置** | config.yaml建议 | `namespace_policies`持久化表 + 优先级匹配规则 |
-| **FTS维护** | trigger同步一句话 | 重建/校验运维接口 + 自动重建策略 + 监控指标 |
-| **事件追踪** | 基础字段 | `actor`/`trace_id`/`request_id`全链路追踪 |
-| **上下文预算** | 无 | `token_budget`/`max_chars`/`max_items`召回裁剪 |
-| **冲突处理** | links表定义 | 召回冲突检测 + `conflict_warning` + 策略选择 |
-| **预留扩展** | 无 | `embedding_ref`字段预留 + `embedding_ref`关联表设计 |
-| **LLM集成** | 无 | LLM配置管理 + 对话自动提取 + 智能分类到4类namespace |
-| **Namespace简化** | 6类(session/task/profile/kb/skills/sop) | 简化为4类(transient/profile/action/knowledge) |
-
----
-
-如果你同意这版，我下一步可以直接给你三份可落地文档草稿：
-1. `schema.sql`（完整建表+索引+trigger，含v0.2全部表）  
-2. `api.md`（请求/响应 JSON Schema + 错误码定义）
-3. `impl-notes.md`（Go实现要点：乐观锁、幂等窗口、滑动TTL续期逻辑）

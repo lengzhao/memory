@@ -81,7 +81,6 @@ func NewExtractor(db *gorm.DB) *Extractor {
 // Example:
 //
 //	cfg := &model.LLMConfig{
-//	    Provider: model.LLMProviderOpenAI,
 //	    APIKey:   os.Getenv("OPENAI_API_KEY"),
 //	    Model:    "gpt-4o",
 //	}
@@ -552,8 +551,8 @@ func deduplicateSimilarMemories(allSimilar map[string][]SimilarMemory) []Similar
 func (e *Extractor) resolveLLMConfig(_ context.Context, req ExtractRequest) (model.LLMConfig, string, error) {
 	if req.LLMConfig != nil {
 		cfg := *req.LLMConfig
-		if cfg.Provider == "" || cfg.Model == "" || cfg.APIKey == "" {
-			return model.LLMConfig{}, "", fmt.Errorf("invalid LLM config: provider/model/api_key are required")
+		if cfg.Model == "" || cfg.APIKey == "" {
+			return model.LLMConfig{}, "", fmt.Errorf("invalid LLM config: model/api_key are required")
 		}
 		if cfg.MaxTokens <= 0 {
 			cfg.MaxTokens = 4096
@@ -564,7 +563,7 @@ func (e *Extractor) resolveLLMConfig(_ context.Context, req ExtractRequest) (mod
 		if cfg.TimeoutSeconds <= 0 {
 			cfg.TimeoutSeconds = 30
 		}
-		return cfg, fmt.Sprintf("runtime:%s:%s", cfg.Provider, cfg.Model), nil
+		return cfg, fmt.Sprintf("runtime:openai:%s", cfg.Model), nil
 	}
 
 	if req.LLMConfigID != "" {

@@ -137,6 +137,11 @@ func (de *DecisionEngine) FindSimilarMemories(ctx context.Context, candidate Ext
 		return nil, err
 	}
 
+	weights, err := de.similarityWeightsForCandidate(ctx, candidate.Namespace)
+	if err != nil {
+		return nil, err
+	}
+
 	// Convert to SimilarMemory with combined similarity score
 	var similar []SimilarMemory
 	for _, item := range items {
@@ -150,8 +155,8 @@ func (de *DecisionEngine) FindSimilarMemories(ctx context.Context, candidate Ext
 		// Calculate tag overlap as additional signal
 		tagSim := calculateTagOverlap(candidate.Tags, parseTags(item.TagsJSON))
 
-		// Combined similarity: weighted average of FTS and tag similarity
-		finalSim := 0.7*ftsSim + 0.3*tagSim
+		// Combined similarity: policy-driven weighted average.
+		finalSim := weights.FTSSimilarity*ftsSim + weights.TagOverlap*tagSim
 
 		if finalSim > 0.2 { // Lower threshold since BM25 is more accurate
 			similar = append(similar, SimilarMemory{
@@ -180,6 +185,57 @@ func (de *DecisionEngine) FindSimilarMemories(ctx context.Context, candidate Ext
 	}
 
 	return similar, nil
+}
+
+type decisionSimilarityWeights struct {
+	FTSSimilarity float64
+	TagOverlap    float64
+}
+
+func (de *DecisionEngine) similarityWeightsForCandidate(ctx context.Context, nsType model.NamespaceType) (decisionSimilarityWeights, error) {
+	namespace := buildDefaultNamespace(nsType)
+	if isIsolationEnabled(ctx) {
+		meta, err := IsolationFromContext(ctx)
+		if err != nil {
+			return decisionSimilarityWeights{}, err
+		}
+		namespace = buildNamespace(meta, nsType)
+	}
+
+	pm := NewPolicyManager(de.db)
+	policy, err := pm.GetPolicy(ctx, namespace)
+	if err != nil {
+		return decisionSimilarityWeights{}, err
+	}
+	return parseDecisionSimilarityWeights(policy.RankWeightsJSON), nil
+}
+
+func parseDecisionSimilarityWeights(rankWeightsJSON string) decisionSimilarityWeights {
+	// Backward-compatible defaults used before policy-driven behavior.
+	weights := decisionSimilarityWeights{
+		FTSSimilarity: 0.7,
+		TagOverlap:    0.3,
+	}
+	if strings.TrimSpace(rankWeightsJSON) == "" {
+		return weights
+	}
+	var raw map[string]float64
+	if err := json.Unmarshal([]byte(rankWeightsJSON), &raw); err != nil {
+		return weights
+	}
+	if v, ok := raw["fts_similarity"]; ok {
+		weights.FTSSimilarity = v
+	}
+	if v, ok := raw["tag_overlap"]; ok {
+		weights.TagOverlap = v
+	}
+	sum := weights.FTSSimilarity + weights.TagOverlap
+	if sum <= 0 {
+		return decisionSimilarityWeights{FTSSimilarity: 0.7, TagOverlap: 0.3}
+	}
+	weights.FTSSimilarity /= sum
+	weights.TagOverlap /= sum
+	return weights
 }
 
 // buildFTSQuery constructs a FTS5 search query from memory components

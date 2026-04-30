@@ -42,3 +42,21 @@ func TestExtractor_PersistMemoryIsolation(t *testing.T) {
 	}
 }
 
+func TestExtractor_ResolveLLMConfigRequiresModelAndAPIKey(t *testing.T) {
+	db := store.SetupTestDB(t)
+	extractor := NewExtractor(db)
+
+	_, _, err := extractor.resolveLLMConfig(context.Background(), ExtractRequest{
+		LLMConfig: &model.LLMConfig{
+			Model: "",
+			APIKey: "test-key",
+		},
+	})
+	if err == nil {
+		t.Fatal("expected config validation error, got nil")
+	}
+	if err.Error() != "invalid LLM config: model/api_key are required" {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+

@@ -23,7 +23,7 @@
 | 变量 | 必需 | 默认值 | 说明 |
 |------|------|--------|------|
 | `OPENAI_API_KEY` | 是 | - | OpenAI API Key |
-| `OPENAI_MODEL` | 否 | `gpt-5.4-nano` | 模型名称 (gpt-4o, gpt-4, gpt-3.5-turbo) |
+| `OPENAI_MODEL` | 否 | `gpt-5.4-nano` | 模型名称（如 gpt-5.4-nano、gpt-4o 或其他 OpenAI 兼容模型） |
 | `OPENAI_BASE_URL` | 否 | `https://api.openai.com/v1` | 自定义API端点 |
 | `OPENAI_TEMPERATURE` | 否 | `0.3` | 温度参数 (0-1)，越低输出越稳定 |
 | `OPENAI_TIMEOUT` | 否 | `30` | API调用超时时间（秒） |
@@ -55,17 +55,24 @@ go run examples/08_extract_demo/main.go
 
 ## 使用自定义 Prompt
 
-你可以在数据库中配置自定义提取提示词：
+你可以在代码中传入自定义提取提示词：
 
 ```go
 prompt := memory.ExtractionPrompt{
     ID: "my-custom-prompt",
-    Name: "Custom Extraction",
     SystemPrompt: `你的自定义提示词...`,
     JSONSchema: `你的JSON Schema...`,
-    IsDefault: true,
 }
-db.Create(&prompt)
+
+req := memory.ExtractRequest{
+    DialogText:        "我喜欢深色主题",
+    MinConfidence:     0.7,
+    ExtractionPrompt:  &prompt,
+    LLMConfig: &memory.LLMConfig{
+        APIKey: "sk-...",
+        Model:  "gpt-4o",
+    },
+}
 ```
 
 ## 故障排除

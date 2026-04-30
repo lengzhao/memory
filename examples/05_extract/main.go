@@ -2,12 +2,14 @@
 // 展示如何使用Extractor从对话中提取记忆
 //
 // 运行前请设置环境变量:
-//   export OPENAI_API_KEY=sk-your-api-key
+//
+//	export OPENAI_API_KEY=sk-your-api-key
 //
 // 或使用本地模型(Ollama):
-//   export OPENAI_BASE_URL=http://localhost:11434/v1
-//   export OPENAI_MODEL=llama3.1:8b
-//   export OPENAI_API_KEY=ollama
+//
+//	export OPENAI_BASE_URL=http://localhost:11434/v1
+//	export OPENAI_MODEL=llama3.1:8b
+//	export OPENAI_API_KEY=ollama
 //
 // 本示例展示代码直接配置LLM（无需预先存储到DB）
 package main
@@ -47,11 +49,9 @@ func main() {
 	// 配置LLM（代码直接配置，无需存储到DB）
 	// 这是新的简化方式：配置通过 ExtractRequest 直接传递
 	llmConfig := &model.LLMConfig{
-		Provider: model.LLMProviderOpenAI,
 		APIKey:   apiKey,
-		Model:    getEnv("OPENAI_MODEL", "gpt-4o"),
+		Model:    getEnv("OPENAI_MODEL", "gpt-5.4-nano"),
 		BaseURL:  strPtr(getEnv("OPENAI_BASE_URL", "")),
-		// 代码配置方式：无需 IsDefault，也无需保存到DB
 	}
 
 	// 创建提取器

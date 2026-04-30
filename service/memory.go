@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"sort"
 	"strings"
 	"time"
@@ -26,13 +27,17 @@ type Config struct {
 
 // MemoryService provides core memory operations.
 type MemoryService struct {
-	db     *gorm.DB
-	config Config
+	db             *gorm.DB
+	config         Config
+	accessStatsSem chan struct{}
 }
 
 // NewMemoryService creates a new memory service instance.
 func NewMemoryService(db *gorm.DB) *MemoryService {
-	return &MemoryService{db: db}
+	return &MemoryService{
+		db:             db,
+		accessStatsSem: make(chan struct{}, 8),
+	}
 }
 
 // WithConfig sets the configuration for the memory service.
@@ -91,6 +96,9 @@ func (s *MemoryService) Remember(ctx context.Context, req RememberRequest) (stri
 			// Duplicate found, return existing ID
 			return existing.ID, nil
 		}
+		if !errors.Is(err, gorm.ErrRecordNotFound) {
+			return "", wrapErr(CodeInternal, "failed to check dedupe key", err)
+		}
 	}
 
 	// Calculate expires_at if TTL provided
@@ -125,6 +133,16 @@ func (s *MemoryService) Remember(ctx context.Context, req RememberRequest) (stri
 	}
 
 	if err := s.db.WithContext(ctx).Create(&item).Error; err != nil {
+		if req.DedupeKey != nil && *req.DedupeKey != "" && isUniqueConstraintError(err) {
+			var existing model.MemoryItem
+			qErr := s.db.WithContext(ctx).
+				Where("namespace = ? AND dedupe_key = ?", namespace, *req.DedupeKey).
+				First(&existing).Error
+			if qErr == nil {
+				return existing.ID, nil
+			}
+			return "", wrapErr(CodeInternal, "dedupe conflict but failed to load existing item", qErr)
+		}
 		return "", wrapErr(CodeInternal, "failed to create memory", err)
 	}
 
@@ -200,56 +218,18 @@ func (s *MemoryService) Recall(ctx context.Context, req RecallRequest) ([]Memory
 		req.MinConfidence = 0.5
 	}
 
-	// Build base query
-	query := s.db.WithContext(ctx).Model(&model.MemoryItem{})
-
-	// Status filter
-	query = query.Where("status = ?", model.ItemStatusActive)
-
-	// Expiry filter (unless include expired)
-	if !req.IncludeExpired {
-		query = query.Where("expires_at IS NULL OR expires_at > ?", time.Now())
-	}
-
-	// Namespace filters
-	if len(req.Namespaces) > 0 {
-		query = query.Where("namespace IN ?", req.Namespaces)
-	}
-	if len(req.NamespaceTypes) > 0 {
-		query = query.Where("namespace_type IN ?", req.NamespaceTypes)
-	}
-
-	// Tag filters (using JSON contains)
-	if len(req.TagsAll) > 0 {
-		for _, tag := range req.TagsAll {
-			query = query.Where("tags_json LIKE ?", fmt.Sprintf("%%\"%s\"%%", tag))
-		}
-	}
-	if len(req.TagsAny) > 0 {
-		conditions := ""
-		params := []interface{}{}
-		for i, tag := range req.TagsAny {
-			if i > 0 {
-				conditions += " OR "
-			}
-			conditions += "tags_json LIKE ?"
-			params = append(params, fmt.Sprintf("%%\"%s\"%%", tag))
-		}
-		query = query.Where("("+conditions+")", params...)
-	}
-
-	// Time range
-	if req.TimeRangeStart != nil {
-		query = query.Where("created_at >= ?", *req.TimeRangeStart)
-	}
-	if req.TimeRangeEnd != nil {
-		query = query.Where("created_at <= ?", *req.TimeRangeEnd)
-	}
-
-	// Exclude specific items
-	if len(req.ExcludeItemIDs) > 0 {
-		query = query.Where("id NOT IN ?", req.ExcludeItemIDs)
-	}
+	query := s.baseFilteredQuery(ctx, filterOptions{
+		Namespaces:     req.Namespaces,
+		NamespaceTypes: req.NamespaceTypes,
+		TagsAny:        req.TagsAny,
+		TagsAll:        req.TagsAll,
+		TimeRangeStart: req.TimeRangeStart,
+		TimeRangeEnd:   req.TimeRangeEnd,
+		IncludeExpired: req.IncludeExpired,
+		ExcludeItemIDs: req.ExcludeItemIDs,
+		MinConfidence:  req.MinConfidence,
+		MinImportance:  req.MinImportance,
+	})
 
 	// Text search if query provided
 	var itemIDs []string
@@ -272,12 +252,6 @@ func (s *MemoryService) Recall(ctx context.Context, req RecallRequest) ([]Memory
 		}
 	}
 
-	// Confidence and importance filters
-	query = query.Where("confidence >= ?", req.MinConfidence)
-	if req.MinImportance > 0 {
-		query = query.Where("importance >= ?", req.MinImportance)
-	}
-
 	// Execute query
 	var items []model.MemoryItem
 	if err := query.Limit(req.TopK * 2).Find(&items).Error; err != nil {
@@ -285,7 +259,10 @@ func (s *MemoryService) Recall(ctx context.Context, req RecallRequest) ([]Memory
 	}
 
 	// Score and rank results
-	hits := s.scoreAndRank(items, req)
+	hits, err := s.scoreAndRank(ctx, items, req)
+	if err != nil {
+		return nil, err
+	}
 
 	// Limit to TopK
 	if len(hits) > req.TopK {
@@ -300,7 +277,7 @@ func (s *MemoryService) Recall(ctx context.Context, req RecallRequest) ([]Memory
 			itemIDs[i] = h.ID
 		}
 	}
-	go s.updateAccessStats(itemIDs)
+	s.enqueueAccessStats(itemIDs)
 
 	return hits, nil
 }
@@ -325,53 +302,18 @@ func (s *MemoryService) List(ctx context.Context, req ListRequest) ([]model.Memo
 		req.MinConfidence = 0.5
 	}
 
-	query := s.db.WithContext(ctx).Model(&model.MemoryItem{})
-	query = query.Where("status = ?", model.ItemStatusActive)
-
-	if !req.IncludeExpired {
-		query = query.Where("expires_at IS NULL OR expires_at > ?", time.Now())
-	}
-
-	if len(req.Namespaces) > 0 {
-		query = query.Where("namespace IN ?", req.Namespaces)
-	}
-	if len(req.NamespaceTypes) > 0 {
-		query = query.Where("namespace_type IN ?", req.NamespaceTypes)
-	}
-
-	if len(req.TagsAll) > 0 {
-		for _, tag := range req.TagsAll {
-			query = query.Where("tags_json LIKE ?", fmt.Sprintf("%%\"%s\"%%", tag))
-		}
-	}
-	if len(req.TagsAny) > 0 {
-		conditions := ""
-		params := []interface{}{}
-		for i, tag := range req.TagsAny {
-			if i > 0 {
-				conditions += " OR "
-			}
-			conditions += "tags_json LIKE ?"
-			params = append(params, fmt.Sprintf("%%\"%s\"%%", tag))
-		}
-		query = query.Where("("+conditions+")", params...)
-	}
-
-	if req.TimeRangeStart != nil {
-		query = query.Where("created_at >= ?", *req.TimeRangeStart)
-	}
-	if req.TimeRangeEnd != nil {
-		query = query.Where("created_at <= ?", *req.TimeRangeEnd)
-	}
-
-	if len(req.ExcludeItemIDs) > 0 {
-		query = query.Where("id NOT IN ?", req.ExcludeItemIDs)
-	}
-
-	query = query.Where("confidence >= ?", req.MinConfidence)
-	if req.MinImportance > 0 {
-		query = query.Where("importance >= ?", req.MinImportance)
-	}
+	query := s.baseFilteredQuery(ctx, filterOptions{
+		Namespaces:     req.Namespaces,
+		NamespaceTypes: req.NamespaceTypes,
+		TagsAny:        req.TagsAny,
+		TagsAll:        req.TagsAll,
+		TimeRangeStart: req.TimeRangeStart,
+		TimeRangeEnd:   req.TimeRangeEnd,
+		IncludeExpired: req.IncludeExpired,
+		ExcludeItemIDs: req.ExcludeItemIDs,
+		MinConfidence:  req.MinConfidence,
+		MinImportance:  req.MinImportance,
+	})
 
 	orderDirection := "DESC"
 	if strings.EqualFold(req.Order, "asc") {
@@ -391,9 +333,11 @@ func (s *MemoryService) List(ctx context.Context, req ListRequest) ([]model.Memo
 }
 
 // scoreAndRank calculates relevance scores for items.
-func (s *MemoryService) scoreAndRank(items []model.MemoryItem, req RecallRequest) []MemoryHit {
+func (s *MemoryService) scoreAndRank(ctx context.Context, items []model.MemoryItem, req RecallRequest) ([]MemoryHit, error) {
 	now := time.Now()
 	hits := make([]MemoryHit, 0, len(items))
+	pm := NewPolicyManager(s.db)
+	weightCache := make(map[string]rankWeights)
 
 	for _, item := range items {
 		hit := MemoryHit{MemoryItem: item}
@@ -417,11 +361,15 @@ func (s *MemoryService) scoreAndRank(items []model.MemoryItem, req RecallRequest
 		// Access boost
 		accessBoost := min(0.1, float64(item.AccessCount)/100.0)
 
+		weights, err := rankWeightsForNamespace(ctx, pm, item.Namespace, weightCache)
+		if err != nil {
+			return nil, err
+		}
 		// Combined score with weights
-		hit.Score = 0.55*hit.FTSScore +
-			0.20*hit.RecencyScore +
-			0.15*hit.ImportanceScore +
-			0.10*hit.ConfidenceScore +
+		hit.Score = weights.FTS*hit.FTSScore +
+			weights.Recency*hit.RecencyScore +
+			weights.Importance*hit.ImportanceScore +
+			weights.Confidence*hit.ConfidenceScore +
 			accessBoost
 
 		hits = append(hits, hit)
@@ -432,7 +380,47 @@ func (s *MemoryService) scoreAndRank(items []model.MemoryItem, req RecallRequest
 		return hits[i].Score > hits[j].Score
 	})
 
-	return hits
+	return hits, nil
+}
+
+type rankWeights struct {
+	FTS        float64
+	Recency    float64
+	Importance float64
+	Confidence float64
+}
+
+func rankWeightsForNamespace(
+	ctx context.Context,
+	pm *PolicyManager,
+	namespace string,
+	cache map[string]rankWeights,
+) (rankWeights, error) {
+	if w, ok := cache[namespace]; ok {
+		return w, nil
+	}
+	policy, err := pm.GetPolicy(ctx, namespace)
+	if err != nil {
+		return rankWeights{}, wrapErr(CodeInternal, "load namespace policy failed", err)
+	}
+	fts, recency, importance, confidence := pm.GetRankWeights(policy)
+	w := rankWeights{
+		FTS:        fts,
+		Recency:    recency,
+		Importance: importance,
+		Confidence: confidence,
+	}
+	sum := w.FTS + w.Recency + w.Importance + w.Confidence
+	if sum <= 0 {
+		w = rankWeights{FTS: 0.55, Recency: 0.20, Importance: 0.15, Confidence: 0.10}
+	} else if math.Abs(sum-1.0) > 0.0001 {
+		w.FTS = w.FTS / sum
+		w.Recency = w.Recency / sum
+		w.Importance = w.Importance / sum
+		w.Confidence = w.Confidence / sum
+	}
+	cache[namespace] = w
+	return w, nil
 }
 
 func expDecay(hoursAgo, halfLifeHours float64) float64 {
@@ -505,17 +493,37 @@ func (s *MemoryService) searchFTS(ctx context.Context, tokenizedQuery string, li
 }
 
 // updateAccessStats updates access count and last_access_at for items.
-func (s *MemoryService) updateAccessStats(itemIDs []string) {
+func (s *MemoryService) updateAccessStats(ctx context.Context, itemIDs []string) {
 	if len(itemIDs) == 0 {
 		return
 	}
 	now := time.Now()
-	s.db.Model(&model.MemoryItem{}).
+	result := s.db.WithContext(ctx).Model(&model.MemoryItem{}).
 		Where("id IN ?", itemIDs).
 		Updates(map[string]interface{}{
 			"access_count":   gorm.Expr("access_count + 1"),
 			"last_access_at": now,
 		})
+	if result.Error != nil {
+		GetLogger().Warn("update access stats failed", "error", result.Error, "item_count", len(itemIDs))
+	}
+}
+
+func (s *MemoryService) enqueueAccessStats(itemIDs []string) {
+	if len(itemIDs) == 0 {
+		return
+	}
+	select {
+	case s.accessStatsSem <- struct{}{}:
+		go func(ids []string) {
+			defer func() { <-s.accessStatsSem }()
+			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			defer cancel()
+			s.updateAccessStats(ctx, ids)
+		}(append([]string(nil), itemIDs...))
+	default:
+		GetLogger().Warn("skip access stats update: worker queue full", "item_count", len(itemIDs))
+	}
 }
 
 // ForgetRequest represents a request to forget memories.
@@ -670,6 +678,10 @@ type UpdateRequest struct {
 
 // Update modifies a memory item with optimistic locking.
 func (s *MemoryService) Update(ctx context.Context, req UpdateRequest) error {
+	if req.ExpectedVersion <= 0 {
+		return newErr(CodeValidation, "expected_version must be greater than 0")
+	}
+
 	var item model.MemoryItem
 	if err := s.db.WithContext(ctx).First(&item, "id = ?", req.ItemID).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -678,14 +690,9 @@ func (s *MemoryService) Update(ctx context.Context, req UpdateRequest) error {
 		return wrapErr(CodeInternal, "query failed", err)
 	}
 
-	// Optimistic locking check
-	if item.Version != req.ExpectedVersion {
-		return wrapErr(CodeConflict, fmt.Sprintf("version conflict: expected %d, got %d", req.ExpectedVersion, item.Version), nil)
-	}
-
 	// Build updates
 	updates := map[string]interface{}{
-		"version":    item.Version + 1,
+		"version":    gorm.Expr("version + 1"),
 		"updated_at": time.Now(),
 	}
 
@@ -726,12 +733,23 @@ func (s *MemoryService) Update(ctx context.Context, req UpdateRequest) error {
 		updates["tokenized_text"] = TokenizeForSearch(title + " " + content + " " + summary)
 	}
 
-	result := s.db.WithContext(ctx).Model(&item).Updates(updates)
+	result := s.db.WithContext(ctx).
+		Model(&model.MemoryItem{}).
+		Where("id = ? AND version = ?", req.ItemID, req.ExpectedVersion).
+		Updates(updates)
 	if result.Error != nil {
 		return wrapErr(CodeInternal, "update failed", result.Error)
 	}
 	if result.RowsAffected == 0 {
-		return newErr(CodeInternal, "update failed: no rows affected")
+		var current model.MemoryItem
+		err := s.db.WithContext(ctx).Select("id, version").First(&current, "id = ?", req.ItemID).Error
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return wrapErr(CodeNotFound, "item not found", err)
+		}
+		if err != nil {
+			return wrapErr(CodeInternal, "failed to verify update conflict", err)
+		}
+		return wrapErr(CodeConflict, fmt.Sprintf("version conflict: expected %d, got %d", req.ExpectedVersion, current.Version), nil)
 	}
 
 	// Reload item and trigger callback
@@ -904,15 +922,116 @@ func (s *MemoryService) RebuildFTS(ctx context.Context) error {
 		return wrapErr(CodeInternal, "fetch items failed", err)
 	}
 
+	failed := make([]string, 0)
 	for _, item := range items {
 		if err := s.db.WithContext(ctx).Exec(`
 			INSERT INTO fts_memory (tokenized_content, item_id)
 			VALUES (?, ?)
 		`, item.TokenizedText, item.ID).Error; err != nil {
-			// Continue on error
+			failed = append(failed, item.ID)
 			continue
 		}
 	}
 
+	if len(failed) > 0 {
+		return wrapErr(
+			CodeInternal,
+			fmt.Sprintf("rebuild fts partially failed: %d items", len(failed)),
+			errors.New(strings.Join(failed, ",")),
+		)
+	}
+
+	ok, err := s.ValidateFTS(ctx)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return wrapErr(CodeInternal, "rebuild fts validation failed", nil)
+	}
+
 	return nil
+}
+
+// ValidateFTS validates that active memory rows and FTS rows are in sync.
+func (s *MemoryService) ValidateFTS(ctx context.Context) (bool, error) {
+	var activeCount int64
+	if err := s.db.WithContext(ctx).Model(&model.MemoryItem{}).
+		Where("status = ?", model.ItemStatusActive).
+		Count(&activeCount).Error; err != nil {
+		return false, wrapErr(CodeInternal, "count active items failed", err)
+	}
+
+	var ftsCount int64
+	row := s.db.WithContext(ctx).Raw("SELECT COUNT(*) FROM fts_memory").Row()
+	if err := row.Scan(&ftsCount); err != nil {
+		return false, wrapErr(CodeInternal, "count fts rows failed", err)
+	}
+
+	return activeCount == ftsCount, nil
+}
+
+type filterOptions struct {
+	Namespaces     []string
+	NamespaceTypes []model.NamespaceType
+	TagsAny        []string
+	TagsAll        []string
+	TimeRangeStart *time.Time
+	TimeRangeEnd   *time.Time
+	IncludeExpired bool
+	ExcludeItemIDs []string
+	MinConfidence  float64
+	MinImportance  int
+}
+
+func (s *MemoryService) baseFilteredQuery(ctx context.Context, opts filterOptions) *gorm.DB {
+	query := s.db.WithContext(ctx).Model(&model.MemoryItem{})
+	query = query.Where("status = ?", model.ItemStatusActive)
+
+	if !opts.IncludeExpired {
+		query = query.Where("expires_at IS NULL OR expires_at > ?", time.Now())
+	}
+	if len(opts.Namespaces) > 0 {
+		query = query.Where("namespace IN ?", opts.Namespaces)
+	}
+	if len(opts.NamespaceTypes) > 0 {
+		query = query.Where("namespace_type IN ?", opts.NamespaceTypes)
+	}
+	if len(opts.TagsAll) > 0 {
+		for _, tag := range opts.TagsAll {
+			query = query.Where("tags_json LIKE ?", fmt.Sprintf("%%\"%s\"%%", tag))
+		}
+	}
+	if len(opts.TagsAny) > 0 {
+		conditions := ""
+		params := make([]interface{}, 0, len(opts.TagsAny))
+		for i, tag := range opts.TagsAny {
+			if i > 0 {
+				conditions += " OR "
+			}
+			conditions += "tags_json LIKE ?"
+			params = append(params, fmt.Sprintf("%%\"%s\"%%", tag))
+		}
+		query = query.Where("("+conditions+")", params...)
+	}
+	if opts.TimeRangeStart != nil {
+		query = query.Where("created_at >= ?", *opts.TimeRangeStart)
+	}
+	if opts.TimeRangeEnd != nil {
+		query = query.Where("created_at <= ?", *opts.TimeRangeEnd)
+	}
+	if len(opts.ExcludeItemIDs) > 0 {
+		query = query.Where("id NOT IN ?", opts.ExcludeItemIDs)
+	}
+	query = query.Where("confidence >= ?", opts.MinConfidence)
+	if opts.MinImportance > 0 {
+		query = query.Where("importance >= ?", opts.MinImportance)
+	}
+	return query
+}
+
+func isUniqueConstraintError(err error) bool {
+	if err == nil {
+		return false
+	}
+	return strings.Contains(strings.ToLower(err.Error()), "unique constraint failed")
 }

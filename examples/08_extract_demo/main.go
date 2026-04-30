@@ -124,7 +124,7 @@ func defaultLLMConfigFromEnv() *model.LLMConfig {
 	}
 	modelName := os.Getenv("OPENAI_MODEL")
 	if modelName == "" {
-		modelName = "gpt-4o"
+		modelName = "gpt-5.4-nano"
 	}
 	temp := 0.3
 	if s := os.Getenv("OPENAI_TEMPERATURE"); s != "" {
@@ -140,7 +140,6 @@ func defaultLLMConfigFromEnv() *model.LLMConfig {
 	}
 	baseURL := os.Getenv("OPENAI_BASE_URL")
 	cfg := &model.LLMConfig{
-		Provider:       model.LLMProviderOpenAI,
 		APIKey:         apiKey,
 		Model:          modelName,
 		MaxTokens:      4096,

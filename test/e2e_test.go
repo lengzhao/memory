@@ -203,7 +203,6 @@ func loadOpenAIConfigFromDotEnv(t *testing.T) *model.LLMConfig {
 
 	timeout := 120
 	return &model.LLMConfig{
-		Provider:       model.LLMProviderOpenAI,
 		APIKey:         apiKey,
 		BaseURL:        &baseURL,
 		Model:          modelName,

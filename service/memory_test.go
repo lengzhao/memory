@@ -3,6 +3,7 @@ package service
 
 import (
 	"context"
+	"sync"
 	"testing"
 	"time"
 
@@ -84,6 +85,47 @@ func TestMemoryService_Remember(t *testing.T) {
 			t.Fatal("Expected expires_at to be set")
 		}
 	})
+
+	t.Run("dedupe key concurrent remember returns stable item id", func(t *testing.T) {
+		key := "concurrent-dedupe-key"
+		baseReq := RememberRequest{
+			NamespaceType: model.NamespaceTypeTransient,
+			Content:       "same memory",
+			DedupeKey:     &key,
+		}
+
+		const workers = 12
+		ids := make([]string, workers)
+		errCh := make(chan error, workers)
+		var wg sync.WaitGroup
+		wg.Add(workers)
+		for i := 0; i < workers; i++ {
+			go func(idx int) {
+				defer wg.Done()
+				id, err := svc.Remember(ctx, baseReq)
+				if err != nil {
+					errCh <- err
+					return
+				}
+				ids[idx] = id
+			}(i)
+		}
+		wg.Wait()
+		close(errCh)
+
+		for err := range errCh {
+			t.Fatalf("concurrent remember failed: %v", err)
+		}
+		first := ids[0]
+		if first == "" {
+			t.Fatal("expected non-empty id")
+		}
+		for _, id := range ids {
+			if id != first {
+				t.Fatalf("expected all ids to be same, got %v", ids)
+			}
+		}
+	})
 }
 
 func TestMemoryService_Recall(t *testing.T) {
@@ -118,7 +160,7 @@ func TestMemoryService_Recall(t *testing.T) {
 
 	t.Run("namespace filter", func(t *testing.T) {
 		req := RecallRequest{
-			TopK:       10,
+			TopK: 10,
 		}
 		hits, err := svc.Recall(ctx, req)
 		if err != nil {
@@ -131,8 +173,8 @@ func TestMemoryService_Recall(t *testing.T) {
 
 	t.Run("tag filter", func(t *testing.T) {
 		req := RecallRequest{
-			TagsAny:    []string{"go"},
-			TopK:       10,
+			TagsAny: []string{"go"},
+			TopK:    10,
 		}
 		hits, err := svc.Recall(ctx, req)
 		if err != nil {
@@ -171,7 +213,7 @@ func TestMemoryService_List(t *testing.T) {
 
 	t.Run("default desc returns newest first", func(t *testing.T) {
 		items, err := svc.List(ctx, ListRequest{
-			TopK:       2,
+			TopK: 2,
 		})
 		if err != nil {
 			t.Fatalf("List failed: %v", err)
@@ -186,8 +228,8 @@ func TestMemoryService_List(t *testing.T) {
 
 	t.Run("asc returns oldest first", func(t *testing.T) {
 		items, err := svc.List(ctx, ListRequest{
-			TopK:       2,
-			Order:      "asc",
+			TopK:  2,
+			Order: "asc",
 		})
 		if err != nil {
 			t.Fatalf("List failed: %v", err)
@@ -252,6 +294,52 @@ func TestMemoryService_Update(t *testing.T) {
 		err := svc.Update(ctx, req)
 		if err == nil {
 			t.Fatal("Expected version conflict error")
+		}
+	})
+
+	t.Run("concurrent update only one succeeds with same expected version", func(t *testing.T) {
+		id2, err := svc.Remember(ctx, RememberRequest{
+			NamespaceType: model.NamespaceTypeTransient,
+			Title:         "Concurrency CAS",
+			Content:       "v1",
+		})
+		if err != nil {
+			t.Fatalf("remember failed: %v", err)
+		}
+
+		var seed model.MemoryItem
+		if err := db.First(&seed, "id = ?", id2).Error; err != nil {
+			t.Fatalf("seed query failed: %v", err)
+		}
+
+		titleA := "A"
+		titleB := "B"
+		reqA := UpdateRequest{ItemID: id2, Title: &titleA, ExpectedVersion: seed.Version}
+		reqB := UpdateRequest{ItemID: id2, Title: &titleB, ExpectedVersion: seed.Version}
+
+		errs := make(chan error, 2)
+		var wg sync.WaitGroup
+		wg.Add(2)
+		go func() { defer wg.Done(); errs <- svc.Update(ctx, reqA) }()
+		go func() { defer wg.Done(); errs <- svc.Update(ctx, reqB) }()
+		wg.Wait()
+		close(errs)
+
+		success := 0
+		conflict := 0
+		for e := range errs {
+			if e == nil {
+				success++
+				continue
+			}
+			if me, ok := ErrorAs(e); ok && me.Code == CodeConflict {
+				conflict++
+				continue
+			}
+			t.Fatalf("unexpected error: %v", e)
+		}
+		if success != 1 || conflict != 1 {
+			t.Fatalf("expected one success and one conflict, got success=%d conflict=%d", success, conflict)
 		}
 	})
 }
@@ -441,5 +529,81 @@ func TestMemoryService_RebuildFTS(t *testing.T) {
 	}
 	if len(hits) == 0 {
 		t.Fatal("expected hits after RebuildFTS, got 0")
+	}
+
+	ok, err := svc.ValidateFTS(ctx)
+	if err != nil {
+		t.Fatalf("ValidateFTS failed: %v", err)
+	}
+	if !ok {
+		t.Fatal("expected FTS validation to pass")
+	}
+
+	// Corrupt one fts row to ensure ValidateFTS can detect mismatch.
+	if err := db.Exec("DELETE FROM fts_memory WHERE rowid IN (SELECT rowid FROM fts_memory LIMIT 1)").Error; err != nil {
+		t.Fatalf("failed to corrupt fts table: %v", err)
+	}
+	ok, err = svc.ValidateFTS(ctx)
+	if err != nil {
+		t.Fatalf("ValidateFTS after corruption failed: %v", err)
+	}
+	if ok {
+		t.Fatal("expected ValidateFTS to report mismatch after corruption")
+	}
+}
+
+func TestMemoryService_RecallUsesPolicyRankWeights(t *testing.T) {
+	db := store.SetupTestDB(t)
+	svc := NewMemoryService(db)
+	pm := NewPolicyManager(db)
+	ctx := context.Background()
+
+	if err := pm.SetPolicy(ctx, model.NamespacePolicy{
+		Namespace:       "knowledge/default",
+		RankWeightsJSON: `{"fts":0,"recency":0,"importance":1,"confidence":0}`,
+	}); err != nil {
+		t.Fatalf("set policy failed: %v", err)
+	}
+
+	idLow, err := svc.Remember(ctx, RememberRequest{
+		NamespaceType: model.NamespaceTypeKnowledge,
+		Title:         "Policy Rank",
+		Content:       "same query text",
+		Importance:    10,
+		Confidence:    0.9,
+	})
+	if err != nil {
+		t.Fatalf("remember low failed: %v", err)
+	}
+
+	idHigh, err := svc.Remember(ctx, RememberRequest{
+		NamespaceType: model.NamespaceTypeKnowledge,
+		Title:         "Policy Rank",
+		Content:       "same query text",
+		Importance:    90,
+		Confidence:    0.9,
+	})
+	if err != nil {
+		t.Fatalf("remember high failed: %v", err)
+	}
+
+	sameTime := time.Now().Add(-1 * time.Hour)
+	if err := db.Model(&model.MemoryItem{}).Where("id IN ?", []string{idLow, idHigh}).
+		Update("created_at", sameTime).Error; err != nil {
+		t.Fatalf("normalize created_at failed: %v", err)
+	}
+
+	hits, err := svc.Recall(ctx, RecallRequest{
+		Query: "same query text",
+		TopK:  2,
+	})
+	if err != nil {
+		t.Fatalf("recall failed: %v", err)
+	}
+	if len(hits) != 2 {
+		t.Fatalf("expected 2 hits, got %d", len(hits))
+	}
+	if hits[0].ID != idHigh {
+		t.Fatalf("expected high-importance item first, got %s", hits[0].ID)
 	}
 }

@@ -51,7 +51,6 @@ type (
 	ItemStatus    = model.ItemStatus
 	SourceType    = model.SourceType
 	TTLPolicy     = model.TTLPolicy
-	LLMProvider   = model.LLMProvider
 )
 
 // Enum constants
@@ -78,12 +77,6 @@ const (
 	TTLFixed   = model.TTLPolicyFixed
 	TTLSliding = model.TTLPolicySliding
 	TTLManual  = model.TTLPolicyManual
-
-	// LLM providers
-	ProviderOpenAI = model.LLMProviderOpenAI
-	ProviderClaude = model.LLMProviderClaude
-	ProviderOllama = model.LLMProviderOllama
-	ProviderCustom = model.LLMProviderCustom
 
 	// Decision types
 	DecisionAdd    = service.DecisionAdd

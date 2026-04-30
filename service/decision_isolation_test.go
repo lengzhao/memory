@@ -125,3 +125,44 @@ func TestDecisionEngine_ExecuteUpdateIsolation(t *testing.T) {
 	}
 }
 
+func TestDecisionEngine_FindSimilarMemoriesUsesPolicyWeights(t *testing.T) {
+	db := store.SetupTestDB(t)
+	svc := NewMemoryService(db)
+	de := NewDecisionEngine(db)
+	pm := NewPolicyManager(db)
+	ctx := context.Background()
+
+	_, err := svc.Remember(ctx, RememberRequest{
+		NamespaceType: model.NamespaceTypeKnowledge,
+		Title:         "Go language",
+		Content:       "Go language created by Google",
+		Tags:          []string{"go", "lang"},
+		Confidence:    0.9,
+	})
+	if err != nil {
+		t.Fatalf("seed remember failed: %v", err)
+	}
+
+	if err := pm.SetPolicy(ctx, model.NamespacePolicy{
+		Namespace:       "knowledge/default",
+		RankWeightsJSON: `{"fts_similarity":0,"tag_overlap":1}`,
+	}); err != nil {
+		t.Fatalf("set policy failed: %v", err)
+	}
+
+	candidate := ExtractedMemory{
+		Namespace: model.NamespaceTypeKnowledge,
+		Title:     "Go language",
+		Content:   "Go language created by Google",
+		Tags:      []string{"java", "jvm"},
+	}
+
+	similar, err := de.FindSimilarMemories(ctx, candidate, 5)
+	if err != nil {
+		t.Fatalf("FindSimilarMemories failed: %v", err)
+	}
+	if len(similar) != 0 {
+		t.Fatalf("expected 0 similar memories when tag-only weights and no overlap, got %d", len(similar))
+	}
+}
+
