@@ -15,6 +15,8 @@ const (
 	ctxKeyUserID    ctxKey = "user_id"
 	ctxKeySessionID ctxKey = "session_id"
 	ctxKeyAgentID   ctxKey = "agent_id"
+
+	defaultIsolationValue = "default"
 )
 
 // IsolationMeta carries isolation identifiers extracted from context.
@@ -27,10 +29,10 @@ type IsolationMeta struct {
 
 // WithIsolation sets required isolation identifiers in one call.
 func WithIsolation(ctx context.Context, tenantID, userID, sessionID, agentID string) context.Context {
-	ctx = context.WithValue(ctx, ctxKeyTenantID, tenantID)
-	ctx = context.WithValue(ctx, ctxKeyUserID, userID)
-	ctx = context.WithValue(ctx, ctxKeySessionID, sessionID)
-	ctx = context.WithValue(ctx, ctxKeyAgentID, agentID)
+	ctx = context.WithValue(ctx, ctxKeyTenantID, valueOrDefault(tenantID))
+	ctx = context.WithValue(ctx, ctxKeyUserID, valueOrDefault(userID))
+	ctx = context.WithValue(ctx, ctxKeySessionID, valueOrDefault(sessionID))
+	ctx = context.WithValue(ctx, ctxKeyAgentID, valueOrDefault(agentID))
 	return ctx
 }
 
@@ -62,6 +64,14 @@ func valueFromContext(ctx context.Context, k ctxKey) string {
 		return s
 	}
 	return ""
+}
+
+func valueOrDefault(v string) string {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return defaultIsolationValue
+	}
+	return v
 }
 
 func buildNamespace(meta IsolationMeta, nsType model.NamespaceType) string {

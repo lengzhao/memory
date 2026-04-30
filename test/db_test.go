@@ -2,6 +2,7 @@ package test
 
 import (
 	"testing"
+	"time"
 
 	"github.com/lengzhao/memory"
 	"github.com/lengzhao/memory/model"
@@ -70,6 +71,49 @@ func TestDBMigrate_LLMTables(t *testing.T) {
 	}
 	if err := tdb.DB.WithContext(ctx).Create(&extraction).Error; err != nil {
 		t.Fatalf("Failed to create dialog extraction: %v", err)
+	}
+}
+
+func TestDBMigrate_DialogHashAllowsMultipleRows(t *testing.T) {
+	tdb := setupTestDB(t)
+	defer tdb.Cleanup()
+
+	ctx := testContext()
+	hash := "same-hash-for-windowed-idempotency"
+
+	first := model.DialogExtraction{
+		ID:         model.GenerateID(),
+		DialogText: "Test dialog 1",
+		DialogHash: hash,
+		ConfigRef:  "llm=runtime:test-config;prompt=prompt-default-v1",
+		Status:     model.ExtractionStatusCompleted,
+		CreatedAt:  time.Now().Add(-72 * time.Hour),
+	}
+	second := model.DialogExtraction{
+		ID:         model.GenerateID(),
+		DialogText: "Test dialog 2",
+		DialogHash: hash,
+		ConfigRef:  "llm=runtime:test-config;prompt=prompt-default-v1",
+		Status:     model.ExtractionStatusCompleted,
+		CreatedAt:  time.Now(),
+	}
+
+	if err := tdb.DB.WithContext(ctx).Create(&first).Error; err != nil {
+		t.Fatalf("Failed to create first dialog extraction: %v", err)
+	}
+	if err := tdb.DB.WithContext(ctx).Create(&second).Error; err != nil {
+		t.Fatalf("Expected same dialog_hash to be insertable, got error: %v", err)
+	}
+
+	var count int64
+	if err := tdb.DB.WithContext(ctx).
+		Model(&model.DialogExtraction{}).
+		Where("dialog_hash = ?", hash).
+		Count(&count).Error; err != nil {
+		t.Fatalf("Failed to count dialog extractions: %v", err)
+	}
+	if count != 2 {
+		t.Fatalf("Expected 2 rows with same dialog_hash, got %d", count)
 	}
 }
 

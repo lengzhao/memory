@@ -86,6 +86,12 @@ func Migrate(db *gorm.DB) error {
 		return fmt.Errorf("auto migration failed: %w", err)
 	}
 
+	// v0.3.1: dialog_hash should not be globally unique.
+	// Older versions created a unique index that breaks 48h windowed idempotency.
+	if err := db.Exec("DROP INDEX IF EXISTS idx_dialog_hash").Error; err != nil {
+		return fmt.Errorf("drop legacy dialog hash unique index failed: %w", err)
+	}
+
 	if err := installFTS5(db); err != nil {
 		return err
 	}

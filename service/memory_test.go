@@ -411,3 +411,35 @@ func TestMemoryService_Callbacks(t *testing.T) {
 		}
 	})
 }
+
+func TestMemoryService_RebuildFTS(t *testing.T) {
+	db := store.SetupTestDB(t)
+	svc := NewMemoryService(db)
+	ctx := context.Background()
+
+	_, err := svc.Remember(ctx, RememberRequest{
+		NamespaceType: model.NamespaceTypeKnowledge,
+		Title:         "Go memory",
+		Content:       "golang 并发 编程",
+		Confidence:    0.9,
+		Importance:    80,
+	})
+	if err != nil {
+		t.Fatalf("seed remember failed: %v", err)
+	}
+
+	if err := svc.RebuildFTS(ctx); err != nil {
+		t.Fatalf("RebuildFTS failed: %v", err)
+	}
+
+	hits, err := svc.Recall(ctx, RecallRequest{
+		Query: "golang",
+		TopK:  5,
+	})
+	if err != nil {
+		t.Fatalf("Recall after rebuild failed: %v", err)
+	}
+	if len(hits) == 0 {
+		t.Fatal("expected hits after RebuildFTS, got 0")
+	}
+}

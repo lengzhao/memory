@@ -73,3 +73,24 @@ func TestMemoryService_IsolationRecallWithContext(t *testing.T) {
 	}
 }
 
+func TestWithIsolation_EmptyValuesFallbackToDefault(t *testing.T) {
+	ctx := WithIsolation(context.Background(), "", "u1", "", "planner")
+
+	meta, err := IsolationFromContext(ctx)
+	if err != nil {
+		t.Fatalf("expected isolation context to be valid with defaults, got %v", err)
+	}
+	if meta.TenantID != "default" {
+		t.Fatalf("expected tenant default, got %q", meta.TenantID)
+	}
+	if meta.SessionID != "default" {
+		t.Fatalf("expected session default, got %q", meta.SessionID)
+	}
+	if meta.UserID != "u1" {
+		t.Fatalf("expected user u1, got %q", meta.UserID)
+	}
+	if meta.AgentID != "planner" {
+		t.Fatalf("expected agent planner, got %q", meta.AgentID)
+	}
+}
+

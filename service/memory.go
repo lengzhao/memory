@@ -589,25 +589,48 @@ func (s *MemoryService) Forget(ctx context.Context, req ForgetRequest) (int, err
 		return int(result.RowsAffected), nil
 
 	case "hard":
-		// Move to deleted_items first, then delete
-		var items []model.MemoryItem
-		if err := dbQuery.Find(&items).Error; err != nil {
-			return 0, wrapErr(CodeInternal, "find items failed", err)
-		}
-		for _, item := range items {
-			data, _ := json.Marshal(item)
-			deleted := model.DeletedItem{
-				ID:               item.ID,
-				OriginalDataJSON: string(data),
-				DeletedAt:        time.Now(),
-				PurgeAfter:       time.Now().Add(7 * 24 * time.Hour),
-				Reason:           &req.Reason,
+		var rowsAffected int64
+		if err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+			// Move to deleted_items first, then delete
+			var items []model.MemoryItem
+			txQuery := tx.Model(&model.MemoryItem{})
+			if len(req.ItemIDs) > 0 {
+				txQuery = txQuery.Where("id IN ?", req.ItemIDs)
 			}
-			s.db.WithContext(ctx).Create(&deleted)
-		}
-		result := dbQuery.Delete(&model.MemoryItem{})
-		if result.Error != nil {
-			return 0, wrapErr(CodeInternal, "hard delete failed", result.Error)
+			if req.Namespace != "" {
+				txQuery = txQuery.Where("namespace = ?", req.Namespace)
+			}
+			if req.NamespaceType != "" {
+				txQuery = txQuery.Where("namespace_type = ?", req.NamespaceType)
+			}
+			if err := txQuery.Find(&items).Error; err != nil {
+				return wrapErr(CodeInternal, "find items failed", err)
+			}
+
+			now := time.Now()
+			purgeAfter := now.Add(7 * 24 * time.Hour)
+			for _, item := range items {
+				data, _ := json.Marshal(item)
+				deleted := model.DeletedItem{
+					ID:               item.ID,
+					OriginalDataJSON: string(data),
+					DeletedAt:        now,
+					PurgeAfter:       purgeAfter,
+					Reason:           &req.Reason,
+				}
+				if err := tx.Create(&deleted).Error; err != nil {
+					return wrapErr(CodeInternal, "backup before hard delete failed", err)
+				}
+			}
+
+			result := txQuery.Delete(&model.MemoryItem{})
+			if result.Error != nil {
+				return wrapErr(CodeInternal, "hard delete failed", result.Error)
+			}
+			rowsAffected = result.RowsAffected
+			return nil
+		}); err != nil {
+			return 0, err
 		}
 		// Trigger callbacks
 		for _, id := range itemIDs {
@@ -615,7 +638,7 @@ func (s *MemoryService) Forget(ctx context.Context, req ForgetRequest) (int, err
 				s.config.OnDeleted(ctx, id)
 			}
 		}
-		return int(result.RowsAffected), nil
+		return int(rowsAffected), nil
 
 	default: // "soft"
 		// Just mark status
@@ -822,45 +845,50 @@ func (s *MemoryService) CleanupExpired(ctx context.Context) (int64, error) {
 
 // PurgeDeleted physically deletes soft-deleted items and moves them to deleted_items.
 func (s *MemoryService) PurgeDeleted(ctx context.Context, before time.Time) (int64, error) {
-	// Find items to purge
-	var items []model.MemoryItem
-	if err := s.db.WithContext(ctx).
-		Where("status = ? AND updated_at < ?", model.ItemStatusDeleted, before).
-		Find(&items).Error; err != nil {
-		return 0, wrapErr(CodeInternal, "find deleted items failed", err)
-	}
-
-	if len(items) == 0 {
-		return 0, nil
-	}
-
-	// Move to deleted_items
-	now := time.Now()
-	purgeAfter := now.Add(7 * 24 * time.Hour)
-	for _, item := range items {
-		data, _ := json.Marshal(item)
-		deleted := model.DeletedItem{
-			ID:               item.ID,
-			OriginalDataJSON: string(data),
-			DeletedAt:        now,
-			PurgeAfter:       purgeAfter,
+	var rowsAffected int64
+	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		// Find items to purge
+		var items []model.MemoryItem
+		if err := tx.
+			Where("status = ? AND updated_at < ?", model.ItemStatusDeleted, before).
+			Find(&items).Error; err != nil {
+			return wrapErr(CodeInternal, "find deleted items failed", err)
 		}
-		if err := s.db.WithContext(ctx).Create(&deleted).Error; err != nil {
-			// Log but continue
-			continue
+		if len(items) == 0 {
+			rowsAffected = 0
+			return nil
 		}
+
+		// Move to deleted_items
+		now := time.Now()
+		purgeAfter := now.Add(7 * 24 * time.Hour)
+		for _, item := range items {
+			data, _ := json.Marshal(item)
+			deleted := model.DeletedItem{
+				ID:               item.ID,
+				OriginalDataJSON: string(data),
+				DeletedAt:        now,
+				PurgeAfter:       purgeAfter,
+			}
+			if err := tx.Create(&deleted).Error; err != nil {
+				return wrapErr(CodeInternal, "archive deleted item failed", err)
+			}
+		}
+
+		// Delete from memory_items
+		result := tx.
+			Where("status = ? AND updated_at < ?", model.ItemStatusDeleted, before).
+			Delete(&model.MemoryItem{})
+		if result.Error != nil {
+			return wrapErr(CodeInternal, "purge deleted failed", result.Error)
+		}
+		rowsAffected = result.RowsAffected
+		return nil
+	})
+	if err != nil {
+		return 0, err
 	}
-
-	// Delete from memory_items
-	result := s.db.WithContext(ctx).
-		Where("status = ? AND updated_at < ?", model.ItemStatusDeleted, before).
-		Delete(&model.MemoryItem{})
-
-	if result.Error != nil {
-		return 0, wrapErr(CodeInternal, "purge deleted failed", result.Error)
-	}
-
-	return result.RowsAffected, nil
+	return rowsAffected, nil
 }
 
 // RebuildFTS rebuilds the FTS5 virtual table from scratch (emergency use).
@@ -878,9 +906,9 @@ func (s *MemoryService) RebuildFTS(ctx context.Context) error {
 
 	for _, item := range items {
 		if err := s.db.WithContext(ctx).Exec(`
-			INSERT INTO fts_memory (item_id, title, content, summary, tags_text)
-			VALUES (?, COALESCE(?, ''), ?, COALESCE(?, ''), COALESCE(?, ''))
-		`, item.ID, item.Title, item.Content, item.Summary, item.TagsJSON).Error; err != nil {
+			INSERT INTO fts_memory (tokenized_content, item_id)
+			VALUES (?, ?)
+		`, item.TokenizedText, item.ID).Error; err != nil {
 			// Continue on error
 			continue
 		}

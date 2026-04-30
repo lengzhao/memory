@@ -172,7 +172,10 @@ func (e *Extractor) Extract(ctx context.Context, req ExtractRequest) (*ExtractRe
 	// Check for existing extraction within 48 hours
 	var existing model.DialogExtraction
 	cutoff := time.Now().Add(-48 * time.Hour)
-	err := e.db.WithContext(ctx).Where("dialog_hash = ? AND created_at > ?", hash, cutoff).First(&existing).Error
+	err := e.db.WithContext(ctx).
+		Where("dialog_hash = ? AND created_at > ?", hash, cutoff).
+		Order("created_at DESC").
+		First(&existing).Error
 	if err == nil {
 		// Return cached result
 		var memories []ExtractedMemory
@@ -186,6 +189,9 @@ func (e *Extractor) Extract(ctx context.Context, req ExtractRequest) (*ExtractRe
 			TotalTokens:    valueOrZero(existing.TotalTokens),
 			ProcessingTime: valueOrZero(existing.ProcessingTimeMs),
 		}, nil
+	}
+	if !errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, fmt.Errorf("failed to query recent extraction cache: %w", err)
 	}
 
 	// Resolve LLM config: use provided, or lookup from DB, or fail
@@ -210,6 +216,27 @@ func (e *Extractor) Extract(ctx context.Context, req ExtractRequest) (*ExtractRe
 		CreatedAt:   time.Now(),
 	}
 	if err := e.db.WithContext(ctx).Create(&exRec).Error; err != nil {
+		// Backward compatibility: old databases may still have the legacy unique index on dialog_hash.
+		// In this case, return the latest cached record for this hash.
+		if strings.Contains(err.Error(), "dialog_extractions.dialog_hash") {
+			var legacy model.DialogExtraction
+			if qErr := e.db.WithContext(ctx).
+				Where("dialog_hash = ?", hash).
+				Order("created_at DESC").
+				First(&legacy).Error; qErr == nil {
+				var memories []ExtractedMemory
+				if legacy.ExtractedMemoriesJSON != "" {
+					_ = json.Unmarshal([]byte(legacy.ExtractedMemoriesJSON), &memories)
+				}
+				return &ExtractResult{
+					ExtractionID:   legacy.ID,
+					Status:         "cached",
+					Memories:       memories,
+					TotalTokens:    valueOrZero(legacy.TotalTokens),
+					ProcessingTime: valueOrZero(legacy.ProcessingTimeMs),
+				}, nil
+			}
+		}
 		return nil, fmt.Errorf("failed to create extraction record: %w", err)
 	}
 

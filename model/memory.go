@@ -270,7 +270,9 @@ type ExtractionPrompt struct {
 type DialogExtraction struct {
 	ID                    string           `gorm:"column:id;type:text;primaryKey"`
 	DialogText            string           `gorm:"column:dialog_text;type:text;not null"`
-	DialogHash            string           `gorm:"column:dialog_hash;type:text;not null;uniqueIndex:idx_dialog_hash"` // SHA256 for idempotency
+	// DialogHash is indexed for recent-window cache lookup.
+	// It is intentionally NOT globally unique because idempotency is a time-window policy (48h), not a forever constraint.
+	DialogHash            string           `gorm:"column:dialog_hash;type:text;not null;index:idx_dialog_hash"`
 	ConfigRef             string           `gorm:"column:config_ref;type:text"`
 	ExtractedMemoriesJSON string           `gorm:"column:extracted_memories_json;type:text"` // Array of ExtractedMemory
 	TotalTokens           *int             `gorm:"column:total_tokens;type:integer"`

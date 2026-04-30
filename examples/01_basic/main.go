@@ -15,6 +15,7 @@ import (
 
 func main() {
 	ctx := context.Background()
+	// 使用上下文隔离,可选
 	ctx = memory.WithIsolation(ctx, "demo-tenant", "demo-user", "demo-session-001", "assistant")
 
 	// 配置结构化日志（可选，不配置则使用默认）
@@ -29,6 +30,9 @@ func main() {
 	cfg := memory.DefaultConfig()
 	// 内存数据库：cfg.Path = ":memory:"
 	cfg.Path = "example.db" // 文件数据库，方便查看
+
+	// 删除数据库文件，方便每次运行都重新初始化
+	defer os.Remove(cfg.Path)
 
 	db, err := memory.InitDB(cfg)
 	if err != nil {
@@ -106,8 +110,8 @@ func main() {
 	fmt.Println("\n=== 5. 回忆用户偏好 ===")
 	hits, err := svc.Recall(ctx, memory.RecallRequest{
 		NamespaceTypes: []memory.NamespaceType{memory.NamespaceProfile},
-		MinConfidence: 0.5,
-		TopK:          10,
+		MinConfidence:  0.5,
+		TopK:           10,
 	})
 	if err != nil {
 		log.Fatal(err)
