@@ -3,7 +3,6 @@ module github.com/lengzhao/memory
 go 1.25.0
 
 require (
-	github.com/glebarez/sqlite v1.11.0
 	github.com/oklog/ulid/v2 v2.1.1
 	gorm.io/gorm v1.25.12
 )
@@ -17,11 +16,14 @@ require (
 	github.com/mattn/go-isatty v0.0.17 // indirect
 	github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec // indirect
 	golang.org/x/sys v0.29.0 // indirect
-	golang.org/x/text v0.14.0 // indirect
+	golang.org/x/text v0.34.0 // indirect
 	modernc.org/libc v1.22.5 // indirect
 	modernc.org/mathutil v1.5.0 // indirect
 	modernc.org/memory v1.5.0 // indirect
 	modernc.org/sqlite v1.23.1 // indirect
 )
 
-require github.com/lengzhao/jiebago v0.2.0
+require (
+	github.com/glebarez/sqlite v1.11.0
+	github.com/lengzhao/jiebago v0.2.0
+)

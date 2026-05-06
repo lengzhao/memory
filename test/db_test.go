@@ -66,7 +66,7 @@ func TestDBMigrate_LLMTables(t *testing.T) {
 		ID:        model.GenerateID(),
 		DialogText: "Test dialog",
 		DialogHash: "abc123",
-		ConfigRef: "llm=runtime:test-config;prompt=prompt-default-v1",
+		ConfigRef: "llm=runtime:test-config;prompt=prompt-default-v3",
 		Status:    model.ExtractionStatusCompleted,
 	}
 	if err := tdb.DB.WithContext(ctx).Create(&extraction).Error; err != nil {
@@ -85,7 +85,7 @@ func TestDBMigrate_DialogHashAllowsMultipleRows(t *testing.T) {
 		ID:         model.GenerateID(),
 		DialogText: "Test dialog 1",
 		DialogHash: hash,
-		ConfigRef:  "llm=runtime:test-config;prompt=prompt-default-v1",
+		ConfigRef:  "llm=runtime:test-config;prompt=prompt-default-v3",
 		Status:     model.ExtractionStatusCompleted,
 		CreatedAt:  time.Now().Add(-72 * time.Hour),
 	}
@@ -93,7 +93,7 @@ func TestDBMigrate_DialogHashAllowsMultipleRows(t *testing.T) {
 		ID:         model.GenerateID(),
 		DialogText: "Test dialog 2",
 		DialogHash: hash,
-		ConfigRef:  "llm=runtime:test-config;prompt=prompt-default-v1",
+		ConfigRef:  "llm=runtime:test-config;prompt=prompt-default-v3",
 		Status:     model.ExtractionStatusCompleted,
 		CreatedAt:  time.Now(),
 	}

@@ -118,7 +118,7 @@ memory/
 └── README.md
 ```
 
-**Schema**：仅通过 `memory.Migrate(db)`（或 `store.Migrate`）初始化。GORM `AutoMigrate` 创建业务表；`store` 内建 FTS5 虚表与同步触发器。提取 **Prompt 可不建表行**：未配置 `is_default` 的 `extraction_prompts` 时，`Extract` 使用 `service` 包内建默认（`dialog_extractions.prompt_id` 记为 `prompt-default-v1`）。需要定制时在 DB 中新增/设置 `is_default` 即可。不使用独立 SQL 迁移目录。
+**Schema**：仅通过 `memory.Migrate(db)`（或 `store.Migrate`）初始化。GORM `AutoMigrate` 创建业务表；`store` 内建 FTS5 虚表与同步触发器。提取 **Prompt 可不建表行**：未配置 `is_default` 的 `extraction_prompts` 时，`Extract` 使用 `service` 包内建默认（`dialog_extractions.prompt_id` 记为 `prompt-default-v3`（Run Journal 证据可信度；**profile** 仅面向终端用户，不由宿主再做短语过滤）。需要定制时在 DB 中新增/设置 `is_default` 即可。不使用独立 SQL 迁移目录。
 
 > **集成说明**：`import "github.com/lengzhao/memory"` 即可；也可按需引用子包 `model`、`service`、`store`。
 

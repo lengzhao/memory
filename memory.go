@@ -103,27 +103,28 @@ var (
 
 // Service types
 type (
-	MemoryService    = service.MemoryService
-	ServiceConfig    = service.Config
-	IsolationMeta    = service.IsolationMeta
-	RememberRequest  = service.RememberRequest
-	RecallRequest    = service.RecallRequest
-	ListRequest      = service.ListRequest
-	MemoryHit        = service.MemoryHit
-	ForgetRequest    = service.ForgetRequest
-	UpdateRequest    = service.UpdateRequest
-	PolicyManager    = service.PolicyManager
-	DecisionEngine   = service.DecisionEngine
-	DecisionType     = service.DecisionType
-	DecisionRequest  = service.DecisionRequest
-	DecisionResult   = service.DecisionResult
-	MemoryDecision   = service.MemoryDecision
-	SimilarMemory    = service.SimilarMemory
-	ExecutionResult  = service.ExecutionResult
-	Extractor        = service.Extractor
-	ExtractRequest   = service.ExtractRequest
-	ExtractedMemory  = service.ExtractedMemory
-	ExtractResult = service.ExtractResult
+	MemoryService   = service.MemoryService
+	ServiceConfig   = service.Config
+	IsolationMeta   = service.IsolationMeta
+	RememberRequest = service.RememberRequest
+	RecallRequest   = service.RecallRequest
+	ListRequest     = service.ListRequest
+	MemoryHit       = service.MemoryHit
+	ForgetRequest   = service.ForgetRequest
+	UpdateRequest   = service.UpdateRequest
+	PolicyManager   = service.PolicyManager
+	DecisionEngine  = service.DecisionEngine
+	DecisionType    = service.DecisionType
+	DecisionRequest = service.DecisionRequest
+	DecisionResult  = service.DecisionResult
+	MemoryDecision  = service.MemoryDecision
+	SimilarMemory   = service.SimilarMemory
+	ExecutionResult = service.ExecutionResult
+	Extractor       = service.Extractor
+	ExtractRequest  = service.ExtractRequest
+	ExtractedMemory = service.ExtractedMemory
+	ExtractResult   = service.ExtractResult
+	ExtractPolicy   = service.ExtractPolicy
 )
 
 // Error types（实现位于 service 包，根包重导出以单 import 使用）
@@ -167,6 +168,11 @@ var (
 	// QuickExtract is a convenience function for code-only extraction.
 	// Pass LLM config directly without DB setup.
 	QuickExtract = service.QuickExtract
+
+	// ApplyExtractPolicy filters extracted rows without persisting (for hosts/tests).
+	ApplyExtractPolicy = service.ApplyExtractPolicy
+	// DefaultTransientEphemeralSubstrings are substring cues for noisy transient memories.
+	DefaultTransientEphemeralSubstrings = service.DefaultTransientEphemeralSubstrings
 )
 
 // Logging allows users to configure their own slog handler.

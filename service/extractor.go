@@ -21,10 +21,10 @@ import (
 
 // openAIRequest is the request body for OpenAI chat completion API.
 type openAIRequest struct {
-	Model          string            `json:"model"`
-	Messages       []openAIMessage   `json:"messages"`
-	Temperature    float64           `json:"temperature"`
-	MaxTokens      int               `json:"max_tokens,omitempty"`
+	Model          string                `json:"model"`
+	Messages       []openAIMessage       `json:"messages"`
+	Temperature    float64               `json:"temperature"`
+	MaxTokens      int                   `json:"max_tokens,omitempty"`
 	ResponseFormat *openAIResponseFormat `json:"response_format,omitempty"`
 }
 
@@ -122,6 +122,12 @@ type ExtractRequest struct {
 	// ExtractionPrompt allows passing prompt directly in code.
 	// If nil, builtin default prompt is used.
 	ExtractionPrompt *model.ExtractionPrompt
+
+	// ExtractPolicy applies extra filtering after MinConfidence (e.g. transient ephemeral cues).
+	ExtractPolicy *ExtractPolicy
+
+	// PostExtractHook runs after MinConfidence and ExtractPolicy, before persistence.
+	PostExtractHook func(ctx context.Context, mem []ExtractedMemory) ([]ExtractedMemory, error)
 }
 
 // ExtractedMemory represents a single extracted memory item
@@ -176,15 +182,18 @@ func (e *Extractor) Extract(ctx context.Context, req ExtractRequest) (*ExtractRe
 		Order("created_at DESC").
 		First(&existing).Error
 	if err == nil {
-		// Return cached result
 		var memories []ExtractedMemory
 		if existing.ExtractedMemoriesJSON != "" {
-			json.Unmarshal([]byte(existing.ExtractedMemoriesJSON), &memories)
+			_ = json.Unmarshal([]byte(existing.ExtractedMemoriesJSON), &memories)
+		}
+		filtered, perr := applyPostExtractPipeline(ctx, memories, req)
+		if perr != nil {
+			return nil, perr
 		}
 		return &ExtractResult{
 			ExtractionID:   existing.ID,
 			Status:         "cached",
-			Memories:       memories,
+			Memories:       filtered,
 			TotalTokens:    valueOrZero(existing.TotalTokens),
 			ProcessingTime: valueOrZero(existing.ProcessingTimeMs),
 		}, nil
@@ -207,12 +216,12 @@ func (e *Extractor) Extract(ctx context.Context, req ExtractRequest) (*ExtractRe
 
 	// Create extraction record (even with code config, we record for audit)
 	exRec := model.DialogExtraction{
-		ID:          model.GenerateID(),
-		DialogText:  req.DialogText,
-		DialogHash:  hash,
-		ConfigRef:   fmt.Sprintf("llm=%s;prompt=%s", llmConfigID, promptID),
-		Status:      model.ExtractionStatusProcessing,
-		CreatedAt:   time.Now(),
+		ID:         model.GenerateID(),
+		DialogText: req.DialogText,
+		DialogHash: hash,
+		ConfigRef:  fmt.Sprintf("llm=%s;prompt=%s", llmConfigID, promptID),
+		Status:     model.ExtractionStatusProcessing,
+		CreatedAt:  time.Now(),
 	}
 	if err := e.db.WithContext(ctx).Create(&exRec).Error; err != nil {
 		// Backward compatibility: old databases may still have the legacy unique index on dialog_hash.
@@ -227,10 +236,14 @@ func (e *Extractor) Extract(ctx context.Context, req ExtractRequest) (*ExtractRe
 				if legacy.ExtractedMemoriesJSON != "" {
 					_ = json.Unmarshal([]byte(legacy.ExtractedMemoriesJSON), &memories)
 				}
+				filtered, perr := applyPostExtractPipeline(ctx, memories, req)
+				if perr != nil {
+					return nil, perr
+				}
 				return &ExtractResult{
 					ExtractionID:   legacy.ID,
 					Status:         "cached",
-					Memories:       memories,
+					Memories:       filtered,
 					TotalTokens:    valueOrZero(legacy.TotalTokens),
 					ProcessingTime: valueOrZero(legacy.ProcessingTimeMs),
 				}, nil
@@ -250,16 +263,15 @@ func (e *Extractor) Extract(ctx context.Context, req ExtractRequest) (*ExtractRe
 		return nil, fmt.Errorf("LLM extraction failed: %w", err)
 	}
 
-	// Filter by confidence
-	minConf := req.MinConfidence
-	if minConf == 0 {
-		minConf = 0.7
-	}
-	var filtered []ExtractedMemory
-	for _, m := range memories {
-		if m.Confidence >= minConf {
-			filtered = append(filtered, m)
-		}
+	filtered, err := applyPostExtractPipeline(ctx, memories, req)
+	if err != nil {
+		errMsg := err.Error()
+		now := time.Now()
+		exRec.ErrorMessage = &errMsg
+		exRec.Status = model.ExtractionStatusFailed
+		exRec.CompletedAt = &now
+		e.db.WithContext(ctx).Save(&exRec)
+		return nil, fmt.Errorf("post-extract pipeline failed: %w", err)
 	}
 
 	// Serialize results
@@ -579,7 +591,7 @@ func (e *Extractor) resolveExtractionPromptV2(req ExtractRequest) (model.Extract
 	if req.ExtractionPrompt != nil {
 		p := *req.ExtractionPrompt
 		if p.ID == "" {
-			p.ID = "prompt-default-v1-code"
+			p.ID = "prompt-default-v3-code"
 		}
 		if strings.TrimSpace(p.SystemPrompt) == "" {
 			return model.ExtractionPrompt{}, "", fmt.Errorf("invalid ExtractionPrompt: system prompt is required")
@@ -662,7 +674,6 @@ func buildExtractionUserPrompt(req ExtractRequest) string {
 	return sb.String()
 }
 
-
 func toJSON(v interface{}) string {
 	b, _ := json.Marshal(v)
 	return string(b)
@@ -674,4 +685,3 @@ func valueOrZero(ptr *int) int {
 	}
 	return *ptr
 }
-
