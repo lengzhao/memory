@@ -9,23 +9,33 @@ import (
 )
 
 const (
-	// maxTokenizeLen limits text length for tokenization.
-	// Long texts are truncated to head + tail to focus on important content.
-	maxTokenizeHead = 100 // First 100 chars
-	maxTokenizeTail = 100 // Last 100 chars
+	// maxTokenizeLen limits how much text is tokenized for the search index.
+	// Long texts are folded into head + tail, keeping both extremes searchable while
+	// bounding index size. Only the index is truncated — the stored content is untouched,
+	// and Recall falls back to a LIKE scan when the index yields nothing.
+	maxTokenizeHead = 120
+	maxTokenizeTail = 120
 )
 
 // TokenizeForSearch tokenizes text for search indexing.
-// Uses jiebago's search engine mode for high recall.
-// Long texts are truncated to head+tail to avoid indexing noise from quoted content.
+// Uses jiebago's search engine mode for high recall; the result is a space-separated
+// token stream with duplicates removed.
 func TokenizeForSearch(text string) string {
 	if text == "" {
 		return ""
 	}
+	return tokenize(truncateForTokenize(text))
+}
 
-	// Truncate long text to head + tail
-	text = truncateForTokenize(text)
+// TokenizeQuery tokenizes a user search query. Queries are short, so no truncation applies.
+func TokenizeQuery(query string) string {
+	if query == "" {
+		return ""
+	}
+	return tokenize(query)
+}
 
+func tokenize(text string) string {
 	var words []string
 	seen := make(map[string]bool)
 
@@ -48,41 +58,15 @@ func TokenizeForSearch(text string) string {
 	return strings.Join(words, " ")
 }
 
-// TokenizeQuery tokenizes user search query.
-// Query is usually short, so no truncation needed.
-func TokenizeQuery(query string) string {
-	if query == "" {
-		return ""
-	}
-
-	var words []string
-	seen := make(map[string]bool)
-
-	for word := range jiebago.Default.CutForSearch(query, true) {
-		word = strings.TrimSpace(word)
-		if word == "" || seen[word] {
-			continue
-		}
-		if isAllPunctOrSpace(word) {
-			continue
-		}
-		words = append(words, word)
-		seen[word] = true
-	}
-
-	return strings.Join(words, " ")
-}
-
 // truncateForTokenize limits text length for indexing.
-// For long text, keeps first 100 and last 100 chars (often contain key info).
-// Example: 1000-char text with long quote in middle → head + " ... " + tail
+// For long text it keeps the first and last maxTokenize* runes, which is where titles,
+// summaries and conclusions usually live.
 func truncateForTokenize(text string) string {
 	runes := []rune(text)
 	if len(runes) <= maxTokenizeHead+maxTokenizeTail {
 		return text
 	}
 
-	// Keep head and tail, discard middle (often quoted/less important content)
 	head := string(runes[:maxTokenizeHead])
 	tail := string(runes[len(runes)-maxTokenizeTail:])
 

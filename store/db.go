@@ -3,6 +3,7 @@ package store
 
 import (
 	"fmt"
+	"time"
 
 	"github.com/glebarez/sqlite" // Pure Go SQLite driver
 	"gorm.io/gorm"
@@ -17,16 +18,29 @@ type Config struct {
 	WALEnabled  bool
 	LogLevel    logger.LogLevel
 	AutoMigrate bool // Automatically run Migrate on InitDB if true
+
+	// MaxOpenConns / MaxIdleConns bound the database pool. SQLite serializes writers, so a
+	// small pool plus busy_timeout is the right shape; defaults: 1 open, 1 idle.
+	MaxOpenConns int
+	MaxIdleConns int
+	// ConnMaxLifetimeSeconds closes idle connections eventually (0 = never).
+	ConnMaxLifetimeSeconds int
+	// BusyTimeoutMilliseconds is how long SQLite waits for a lock before returning SQLITE_BUSY.
+	// Defaults to 5000.
+	BusyTimeoutMilliseconds int
 }
 
 // DefaultConfig returns default database configuration.
 // AutoMigrate defaults to true for ease of use.
 func DefaultConfig() Config {
 	return Config{
-		Path:        "memory.db",
-		WALEnabled:  true,
-		LogLevel:    logger.Silent,
-		AutoMigrate: true,
+		Path:                    "memory.db",
+		WALEnabled:              true,
+		LogLevel:                logger.Silent,
+		AutoMigrate:             true,
+		MaxOpenConns:            1,
+		MaxIdleConns:            1,
+		BusyTimeoutMilliseconds: 5000,
 	}
 }
 
@@ -41,6 +55,26 @@ func InitDB(cfg Config) (*gorm.DB, error) {
 	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to open database: %w", err)
+	}
+
+	// Bound the pool: SQLite allows a single writer at a time, and an unbounded pool turns
+	// concurrent writes into SQLITE_BUSY errors that callers cannot retry through.
+	sqlDB, err := db.DB()
+	if err != nil {
+		return nil, fmt.Errorf("failed to access sql.DB: %w", err)
+	}
+	maxOpen := cfg.MaxOpenConns
+	if maxOpen <= 0 {
+		maxOpen = 1
+	}
+	sqlDB.SetMaxOpenConns(maxOpen)
+	maxIdle := cfg.MaxIdleConns
+	if maxIdle <= 0 {
+		maxIdle = maxOpen
+	}
+	sqlDB.SetMaxIdleConns(maxIdle)
+	if cfg.ConnMaxLifetimeSeconds > 0 {
+		sqlDB.SetConnMaxLifetime(time.Duration(cfg.ConnMaxLifetimeSeconds) * time.Second)
 	}
 
 	// Enable foreign keys
@@ -60,8 +94,13 @@ func InitDB(cfg Config) (*gorm.DB, error) {
 
 // buildDSN constructs the SQLite DSN with pragmas
 func buildDSN(cfg Config) string {
-	base := fmt.Sprintf("%s?_pragma=busy_timeout(5000)&_pragma=journal_mode(%s)&_pragma=synchronous(NORMAL)&_pragma=cache_size(-20000)&_pragma=temp_store(MEMORY)&_pragma=mmap_size(268435456)",
+	busyTimeout := cfg.BusyTimeoutMilliseconds
+	if busyTimeout <= 0 {
+		busyTimeout = 5000
+	}
+	base := fmt.Sprintf("%s?_pragma=busy_timeout(%d)&_pragma=journal_mode(%s)&_pragma=synchronous(NORMAL)&_pragma=cache_size(-20000)&_pragma=temp_store(MEMORY)&_pragma=mmap_size(268435456)&_pragma=foreign_keys(1)",
 		cfg.Path,
+		busyTimeout,
 		map[bool]string{true: "WAL", false: "DELETE"}[cfg.WALEnabled],
 	)
 	return base
@@ -91,6 +130,15 @@ func Migrate(db *gorm.DB) error {
 	if err := db.Exec("DROP INDEX IF EXISTS idx_dialog_hash").Error; err != nil {
 		return fmt.Errorf("drop legacy dialog hash unique index failed: %w", err)
 	}
+
+	// Extraction cache lookups are scoped by (scope_key, dialog_hash) inside a time window.
+	if err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_ext_scope_hash_created
+		ON dialog_extractions (scope_key, dialog_hash, created_at)`).Error; err != nil {
+		return fmt.Errorf("create extraction cache index failed: %w", err)
+	}
+
+	// Purge sweeps scan deleted_items by purge_after; the index is declared on the model
+	// (idx_del_purge) and therefore managed by AutoMigrate above.
 
 	if err := installFTS5(db); err != nil {
 		return err

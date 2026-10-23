@@ -19,6 +19,9 @@ import (
 	"github.com/lengzhao/memory/model"
 )
 
+// DefaultLLMTimeout bounds every LLM HTTP call when LLMConfig.TimeoutSeconds is unset.
+const DefaultLLMTimeout = 120 * time.Second
+
 // openAIRequest is the request body for OpenAI chat completion API.
 type openAIRequest struct {
 	Model          string                `json:"model"`
@@ -166,40 +169,49 @@ type DecisionExecutionSummary struct {
 	Errors  []string `json:"errors,omitempty"`
 }
 
-// Extract processes dialog text and extracts memories
-// In production, this would call actual LLM API
+// Extract processes dialog text and extracts memories.
+//
+// Caching: a completed extraction is reused for 48h, scoped by isolation identity (scope_key)
+// and only when the request is a dry run. A cached row is never used to answer a request that
+// actually persists, so a dry-run probe (or a retried write) cannot leave memories unwritten.
 func (e *Extractor) Extract(ctx context.Context, req ExtractRequest) (*ExtractResult, error) {
 	start := time.Now()
 
 	// Idempotency key: stable when only DialogText is set (backwards compatible)
 	hash := extractionCacheKey(req)
+	scopeKey := extractionScopeKey(ctx)
 
-	// Check for existing extraction within 48 hours
-	var existing model.DialogExtraction
-	cutoff := time.Now().Add(-48 * time.Hour)
-	err := e.db.WithContext(ctx).
-		Where("dialog_hash = ? AND created_at > ?", hash, cutoff).
-		Order("created_at DESC").
-		First(&existing).Error
-	if err == nil {
-		var memories []ExtractedMemory
-		if existing.ExtractedMemoriesJSON != "" {
-			_ = json.Unmarshal([]byte(existing.ExtractedMemoriesJSON), &memories)
+	// Check for existing extraction within 48 hours, for this isolation scope only.
+	// Dry runs always call the model: they are probes and must not poison the cache either.
+	if req.DryRun {
+		// fall through to a fresh call
+	} else {
+		var existing model.DialogExtraction
+		cutoff := time.Now().Add(-48 * time.Hour)
+		err := e.db.WithContext(ctx).
+			Where("scope_key = ? AND dialog_hash = ? AND created_at > ?", scopeKey, hash, cutoff).
+			Order("created_at DESC").
+			First(&existing).Error
+		if err == nil {
+			var memories []ExtractedMemory
+			if existing.ExtractedMemoriesJSON != "" {
+				_ = json.Unmarshal([]byte(existing.ExtractedMemoriesJSON), &memories)
+			}
+			filtered, perr := applyPostExtractPipeline(ctx, memories, req)
+			if perr != nil {
+				return nil, perr
+			}
+			return &ExtractResult{
+				ExtractionID:   existing.ID,
+				Status:         "cached",
+				Memories:       filtered,
+				TotalTokens:    valueOrZero(existing.TotalTokens),
+				ProcessingTime: valueOrZero(existing.ProcessingTimeMs),
+			}, nil
 		}
-		filtered, perr := applyPostExtractPipeline(ctx, memories, req)
-		if perr != nil {
-			return nil, perr
+		if !errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, fmt.Errorf("failed to query recent extraction cache: %w", err)
 		}
-		return &ExtractResult{
-			ExtractionID:   existing.ID,
-			Status:         "cached",
-			Memories:       filtered,
-			TotalTokens:    valueOrZero(existing.TotalTokens),
-			ProcessingTime: valueOrZero(existing.ProcessingTimeMs),
-		}, nil
-	}
-	if !errors.Is(err, gorm.ErrRecordNotFound) {
-		return nil, fmt.Errorf("failed to query recent extraction cache: %w", err)
 	}
 
 	// Resolve LLM config: use provided, or lookup from DB, or fail
@@ -215,21 +227,27 @@ func (e *Extractor) Extract(ctx context.Context, req ExtractRequest) (*ExtractRe
 	}
 
 	// Create extraction record (even with code config, we record for audit)
+	// Dry-run probes are recorded as their own status so they never satisfy a real cache lookup.
+	initialStatus := model.ExtractionStatusProcessing
+	if req.DryRun {
+		initialStatus = model.ExtractionStatusPending
+	}
 	exRec := model.DialogExtraction{
 		ID:         model.GenerateID(),
+		ScopeKey:   scopeKey,
 		DialogText: req.DialogText,
 		DialogHash: hash,
 		ConfigRef:  fmt.Sprintf("llm=%s;prompt=%s", llmConfigID, promptID),
-		Status:     model.ExtractionStatusProcessing,
+		Status:     initialStatus,
 		CreatedAt:  time.Now(),
 	}
 	if err := e.db.WithContext(ctx).Create(&exRec).Error; err != nil {
 		// Backward compatibility: old databases may still have the legacy unique index on dialog_hash.
-		// In this case, return the latest cached record for this hash.
+		// In this case, return the latest cached record for this hash (within this scope).
 		if strings.Contains(err.Error(), "dialog_extractions.dialog_hash") {
 			var legacy model.DialogExtraction
 			if qErr := e.db.WithContext(ctx).
-				Where("dialog_hash = ?", hash).
+				Where("scope_key = ? AND dialog_hash = ?", scopeKey, hash).
 				Order("created_at DESC").
 				First(&legacy).Error; qErr == nil {
 				var memories []ExtractedMemory
@@ -285,7 +303,13 @@ func (e *Extractor) Extract(ctx context.Context, req ExtractRequest) (*ExtractRe
 	exRec.ExtractedMemoriesJSON = string(memoriesJSON)
 	exRec.TotalTokens = &totalTokens
 	exRec.ProcessingTimeMs = &processingTime
-	exRec.Status = model.ExtractionStatusCompleted
+	if req.DryRun {
+		// Dry-run rows stay out of the completed cache: they were produced under a different
+		// persistence decision and must be re-evaluated when the host writes for real.
+		exRec.Status = model.ExtractionStatusPending
+	} else {
+		exRec.Status = model.ExtractionStatusCompleted
+	}
 	exRec.CompletedAt = &now
 
 	if err := e.db.WithContext(ctx).Save(&exRec).Error; err != nil {
@@ -364,8 +388,14 @@ func callLLM(ctx context.Context, cfg model.LLMConfig, messages []openAIMessage,
 	httpReq.Header.Set("Authorization", "Bearer "+apiKey)
 	httpReq.Header.Set("Content-Type", "application/json")
 
+	// A zero/negative timeout means "no timeout" for http.Client, which would let a stuck
+	// provider block a caller forever. Fall back to a bounded default instead.
+	timeout := time.Duration(cfg.TimeoutSeconds) * time.Second
+	if timeout <= 0 {
+		timeout = DefaultLLMTimeout
+	}
 	httpClient := &http.Client{
-		Timeout: time.Duration(cfg.TimeoutSeconds) * time.Second,
+		Timeout: timeout,
 	}
 
 	resp, err := httpClient.Do(httpReq)
@@ -445,17 +475,17 @@ func (e *Extractor) callOpenAI(ctx context.Context, cfg model.LLMConfig, prompt 
 // persistMemory saves extracted memory to database
 func (e *Extractor) persistMemory(ctx context.Context, mem ExtractedMemory) error {
 	// Scope duplicate checks to the resolved namespace to avoid cross-session leakage.
-	ns := buildDefaultNamespace(mem.Namespace)
-	if isIsolationEnabled(ctx) {
-		meta, err := IsolationFromContext(ctx)
-		if err != nil {
-			return err
-		}
-		ns = buildNamespace(meta, mem.Namespace)
+	meta, isolated, err := resolveIsolation(ctx)
+	if err != nil {
+		return err
+	}
+	ns, err := resolveTargetNamespace(meta, isolated, "", mem.Namespace)
+	if err != nil {
+		return err
 	}
 
 	var existing model.MemoryItem
-	err := e.db.WithContext(ctx).
+	err = e.db.WithContext(ctx).
 		Where("namespace = ? AND namespace_type = ? AND content = ?", ns, mem.Namespace, mem.Content).
 		First(&existing).Error
 	if err == nil {
@@ -628,6 +658,13 @@ func extractionCacheKey(req ExtractRequest) string {
 	h := sha256.New()
 	h.Write([]byte(b.String()))
 	return hex.EncodeToString(h.Sum(nil))[:32]
+}
+
+// extractionScopeKey derives the isolation scope of an extraction request. Extractions are
+// cached per scope so one tenant's result can never be replayed for another.
+func extractionScopeKey(ctx context.Context) string {
+	meta := isolationFromContextLoose(ctx)
+	return strings.Join([]string{meta.TenantID, meta.UserID, meta.SessionID, meta.AgentID}, "|")
 }
 
 func calculateHash(text string) string {

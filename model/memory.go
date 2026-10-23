@@ -176,6 +176,7 @@ type MemoryEvent struct {
 	ID          string    `gorm:"column:id;type:text;primaryKey"`
 	ItemID      *string   `gorm:"column:item_id;type:text;index:idx_event_item"`
 	EventType   EventType `gorm:"column:event_type;type:text;not null;index:idx_event_type"`
+	Namespace   string    `gorm:"column:namespace;type:text"`                   // namespace the event applies to (empty for multi-namespace ops)
 	Actor       *string   `gorm:"column:actor;type:text;index:idx_event_actor"` // agent_id/user_id/system
 	TraceID     *string   `gorm:"column:trace_id;type:text;index:idx_event_trace"`
 	RequestID   *string   `gorm:"column:request_id;type:text;index:idx_event_request"`
@@ -188,8 +189,10 @@ func (MemoryEvent) TableName() string {
 	return "memory_events"
 }
 
-// DeletedItem stores soft-deleted memory items for recovery.
-// Items are physically purged after purge_after date.
+// DeletedItem stores hard-deleted memory items for recovery.
+// OriginalDataJSON keeps the raw row so an operator can restore it, therefore the
+// retention window (PurgeAfter) is enforced by PurgeExpiredDeleted and hard deletes
+// may be performed irreversibly via PurgeDeletedNow.
 type DeletedItem struct {
 	ID               string    `gorm:"column:id;type:text;primaryKey"`
 	OriginalDataJSON string    `gorm:"column:original_data_json;type:text;not null"` // Full backup including FTS fields
@@ -257,9 +260,13 @@ type ExtractionPrompt struct {
 
 // DialogExtraction records the extraction process and results
 type DialogExtraction struct {
-	ID                    string           `gorm:"column:id;type:text;primaryKey"`
-	DialogText            string           `gorm:"column:dialog_text;type:text;not null"`
-	// DialogHash is indexed for recent-window cache lookup.
+	ID string `gorm:"column:id;type:text;primaryKey"`
+	// ScopeKey is the isolation scope (tenant/user/session/agent) of the request that produced
+	// this extraction. It is part of the cache lookup key so one tenant's extraction result is
+	// never replayed for another tenant.
+	ScopeKey   string `gorm:"column:scope_key;type:text;not null;default:'';index:idx_ext_scope"`
+	DialogText string `gorm:"column:dialog_text;type:text;not null"`
+	// DialogHash is indexed for recent-window cache lookup (scoped by ScopeKey).
 	// It is intentionally NOT globally unique because idempotency is a time-window policy (48h), not a forever constraint.
 	DialogHash            string           `gorm:"column:dialog_hash;type:text;not null;index:idx_dialog_hash"`
 	ConfigRef             string           `gorm:"column:config_ref;type:text"`

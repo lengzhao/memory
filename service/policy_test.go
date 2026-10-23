@@ -12,7 +12,7 @@ import (
 func TestPolicyManager_GetPolicy(t *testing.T) {
 	db := store.SetupTestDB(t)
 	pm := NewPolicyManager(db)
-	ctx := context.Background()
+	ctx := AllowGlobal(context.Background())
 
 	t.Run("default policy for transient", func(t *testing.T) {
 		policy, err := pm.GetPolicy(ctx, "transient/session123")
@@ -76,7 +76,7 @@ func TestPolicyManager_GetPolicy(t *testing.T) {
 func TestPolicyManager_SetPolicy(t *testing.T) {
 	db := store.SetupTestDB(t)
 	pm := NewPolicyManager(db)
-	ctx := context.Background()
+	ctx := AllowGlobal(context.Background())
 
 	t.Run("create new policy", func(t *testing.T) {
 		policy := model.NamespacePolicy{

@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/lengzhao/memory/model"
@@ -66,31 +67,49 @@ func TestMemoryService_IsolationRecallWithContext(t *testing.T) {
 	db := store.SetupTestDB(t)
 	svc := NewMemoryService(db)
 
-	_, err := svc.Recall(isolatedCtx("s1"), RecallRequest{
-	})
+	_, err := svc.Recall(isolatedCtx("s1"), RecallRequest{})
 	if err != nil {
 		t.Fatalf("expected recall success in isolation mode, got %v", err)
 	}
 }
 
-func TestWithIsolation_EmptyValuesFallbackToDefault(t *testing.T) {
+func TestWithIsolation_BlankValuesFailClosed(t *testing.T) {
+	// Blank identifiers are stored as-is (no silent "default"), and operations that run with a
+	// partial identity are rejected instead of touching the shared namespaces.
 	ctx := WithIsolation(context.Background(), "", "u1", "", "planner")
 
-	meta, err := IsolationFromContext(ctx)
-	if err != nil {
-		t.Fatalf("expected isolation context to be valid with defaults, got %v", err)
+	meta := IsolationFromContext(ctx)
+	if meta.TenantID != "" || meta.SessionID != "" {
+		t.Fatalf("blank identifiers must not be defaulted, got %+v", meta)
 	}
-	if meta.TenantID != "default" {
-		t.Fatalf("expected tenant default, got %q", meta.TenantID)
+	if meta.UserID != "u1" || meta.AgentID != "planner" {
+		t.Fatalf("expected user/agent to be preserved, got %+v", meta)
 	}
-	if meta.SessionID != "default" {
-		t.Fatalf("expected session default, got %q", meta.SessionID)
+
+	svc := NewMemoryService(store.SetupTestDB(t))
+	_, err := svc.Remember(ctx, RememberRequest{NamespaceType: model.NamespaceTypeTransient, Content: "x"})
+	if err == nil {
+		t.Fatal("expected an incomplete isolation context to be rejected")
 	}
-	if meta.UserID != "u1" {
-		t.Fatalf("expected user u1, got %q", meta.UserID)
-	}
-	if meta.AgentID != "planner" {
-		t.Fatalf("expected agent planner, got %q", meta.AgentID)
+	var me *MemoryError
+	if !errors.As(err, &me) || me.Code != CodeValidation {
+		t.Fatalf("expected VALIDATION error, got %v", err)
 	}
 }
 
+func TestAllowGlobal_MissingIsolationFailsClosed(t *testing.T) {
+	svc := NewMemoryService(store.SetupTestDB(t))
+	_, err := svc.Remember(context.Background(), RememberRequest{NamespaceType: model.NamespaceTypeTransient, Content: "x"})
+	if err == nil {
+		t.Fatal("expected a missing isolation context to be rejected")
+	}
+	var me *MemoryError
+	if !errors.As(err, &me) || me.Code != CodeUnauthorized {
+		t.Fatalf("expected UNAUTHORIZED error, got %v", err)
+	}
+
+	// AllowGlobal opts a single-user deployment into the global namespaces.
+	if _, err := svc.Remember(AllowGlobal(context.Background()), RememberRequest{NamespaceType: model.NamespaceTypeTransient, Content: "x"}); err != nil {
+		t.Fatalf("expected global mode to work, got %v", err)
+	}
+}

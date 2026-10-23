@@ -14,7 +14,7 @@ import (
 func TestMemoryService_Remember(t *testing.T) {
 	db := store.SetupTestDB(t)
 	svc := NewMemoryService(db)
-	ctx := context.Background()
+	ctx := AllowGlobal(context.Background())
 
 	t.Run("basic remember", func(t *testing.T) {
 		req := RememberRequest{
@@ -131,7 +131,7 @@ func TestMemoryService_Remember(t *testing.T) {
 func TestMemoryService_Recall(t *testing.T) {
 	db := store.SetupTestDB(t)
 	svc := NewMemoryService(db)
-	ctx := context.Background()
+	ctx := AllowGlobal(context.Background())
 
 	// Seed data
 	for i := 0; i < 5; i++ {
@@ -189,7 +189,7 @@ func TestMemoryService_Recall(t *testing.T) {
 func TestMemoryService_List(t *testing.T) {
 	db := store.SetupTestDB(t)
 	svc := NewMemoryService(db)
-	ctx := context.Background()
+	ctx := AllowGlobal(context.Background())
 
 	create := func(title string) {
 		_, err := svc.Remember(ctx, RememberRequest{
@@ -246,7 +246,7 @@ func TestMemoryService_List(t *testing.T) {
 func TestMemoryService_Update(t *testing.T) {
 	db := store.SetupTestDB(t)
 	svc := NewMemoryService(db)
-	ctx := context.Background()
+	ctx := AllowGlobal(context.Background())
 
 	// Create item
 	id, _ := svc.Remember(ctx, RememberRequest{
@@ -347,7 +347,7 @@ func TestMemoryService_Update(t *testing.T) {
 func TestMemoryService_Forget(t *testing.T) {
 	db := store.SetupTestDB(t)
 	svc := NewMemoryService(db)
-	ctx := context.Background()
+	ctx := AllowGlobal(context.Background())
 
 	// Create items
 	var ids []string
@@ -404,7 +404,7 @@ func TestMemoryService_Forget(t *testing.T) {
 func TestMemoryService_Touch(t *testing.T) {
 	db := store.SetupTestDB(t)
 	svc := NewMemoryService(db)
-	ctx := context.Background()
+	ctx := AllowGlobal(context.Background())
 
 	id, _ := svc.Remember(ctx, RememberRequest{
 		NamespaceType: model.NamespaceTypeTransient,
@@ -437,7 +437,7 @@ func TestMemoryService_Touch(t *testing.T) {
 
 func TestMemoryService_Callbacks(t *testing.T) {
 	db := store.SetupTestDB(t)
-	ctx := context.Background()
+	ctx := AllowGlobal(context.Background())
 
 	var createdID string
 	var updatedItem model.MemoryItem
@@ -503,7 +503,7 @@ func TestMemoryService_Callbacks(t *testing.T) {
 func TestMemoryService_RebuildFTS(t *testing.T) {
 	db := store.SetupTestDB(t)
 	svc := NewMemoryService(db)
-	ctx := context.Background()
+	ctx := AllowGlobal(context.Background())
 
 	_, err := svc.Remember(ctx, RememberRequest{
 		NamespaceType: model.NamespaceTypeKnowledge,
@@ -556,7 +556,7 @@ func TestMemoryService_RecallUsesPolicyRankWeights(t *testing.T) {
 	db := store.SetupTestDB(t)
 	svc := NewMemoryService(db)
 	pm := NewPolicyManager(db)
-	ctx := context.Background()
+	ctx := AllowGlobal(context.Background())
 
 	if err := pm.SetPolicy(ctx, model.NamespacePolicy{
 		Namespace:       "knowledge/default",

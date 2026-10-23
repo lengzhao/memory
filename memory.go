@@ -91,6 +91,12 @@ type (
 	Config = store.Config
 )
 
+// Janitor types (background maintenance).
+type (
+	Janitor       = service.Janitor
+	JanitorConfig = service.JanitorConfig
+)
+
 // Database functions
 var (
 	// Configuration
@@ -105,6 +111,7 @@ var (
 type (
 	MemoryService   = service.MemoryService
 	ServiceConfig   = service.Config
+	Stats           = service.Stats
 	IsolationMeta   = service.IsolationMeta
 	RememberRequest = service.RememberRequest
 	RecallRequest   = service.RecallRequest
@@ -164,6 +171,10 @@ var (
 	NewPolicyManager  = service.NewPolicyManager
 	NewExtractor      = service.NewExtractor
 	NewDecisionEngine = service.NewDecisionEngine
+	// NewSummaryGenerator creates the namespace/item summary generator.
+	NewSummaryGenerator = service.NewSummaryGenerator
+	// NewJanitor runs the background maintenance loop (expiry + retention).
+	NewJanitor = service.NewJanitor
 
 	// QuickExtract is a convenience function for code-only extraction.
 	// Pass LLM config directly without DB setup.
@@ -184,9 +195,31 @@ var (
 	SetLogger = service.SetLogger
 	GetLogger = service.GetLogger
 
-	// Context-based isolation helpers
+	// Context-based isolation helpers.
+	//
+	// Operations fail closed: without WithIsolation (or AllowGlobal) they return
+	// CodeUnauthorized instead of touching the shared default namespaces, and an
+	// incomplete identity returns CodeValidation.
 	WithIsolation        = service.WithIsolation
+	AllowGlobal          = service.AllowGlobal
+	HasIsolation         = service.HasIsolation
 	IsolationFromContext = service.IsolationFromContext
+
+	// Audit helpers: attach actor/trace identifiers for memory_events
+	// (Config.RecordEvents enables the trail).
+	WithActor = service.WithActor
+	WithTrace = service.WithTrace
+)
+
+// Default limits used by the service when a request leaves them unset.
+const (
+	// DefaultMinConfidence is applied when a recall/list request leaves MinConfidence unset
+	// (set SkipConfidenceFilter for "no filter").
+	DefaultMinConfidence = service.DefaultMinConfidence
+	// MaxContentRunes bounds the size of one memory row.
+	MaxContentRunes = service.MaxContentRunes
+	// DefaultDeletedRetention is how long a hard-deleted row stays recoverable.
+	DefaultDeletedRetention = service.DefaultDeletedRetention
 )
 
 // 下列符号在 service 包定义，根包再导出便于单 import。

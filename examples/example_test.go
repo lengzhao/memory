@@ -61,7 +61,7 @@ func Example_memoryService() {
 
 	// Create service
 	svc := memory.NewMemoryService(db)
-	ctx := context.Background()
+	ctx := memory.AllowGlobal(context.Background())
 	ctx = memory.WithIsolation(ctx, "t1", "u1", "s1", "assistant")
 
 	// Store a memory
@@ -101,10 +101,10 @@ func Example_memoryService_contextIsolation() {
 
 	svc := memory.NewMemoryService(db)
 
-	ctxS1 := context.Background()
+	ctxS1 := memory.AllowGlobal(context.Background())
 	ctxS1 = memory.WithIsolation(ctxS1, "t1", "u1", "s1", "planner")
 
-	ctxS2 := context.Background()
+	ctxS2 := memory.AllowGlobal(context.Background())
 	ctxS2 = memory.WithIsolation(ctxS2, "t1", "u1", "s2", "planner")
 
 	_, err = svc.Remember(ctxS1, memory.RememberRequest{
@@ -162,7 +162,7 @@ func Example_extractor() {
 		DryRun:        true,
 	}
 
-	result, err := extractor.Extract(context.Background(), req)
+	result, err := extractor.Extract(memory.AllowGlobal(context.Background()), req)
 	if err != nil {
 		log.Fatal(err)
 	}

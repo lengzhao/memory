@@ -30,7 +30,7 @@ func TestExtractor_PersistMemoryIsolation(t *testing.T) {
 	}
 
 	var count int64
-	if err := db.WithContext(context.Background()).
+	if err := db.WithContext(AllowGlobal(context.Background())).
 		Model(&model.MemoryItem{}).
 		Where("namespace_type = ? AND content = ?", model.NamespaceTypeTransient, "same content").
 		Count(&count).Error; err != nil {
@@ -46,9 +46,9 @@ func TestExtractor_ResolveLLMConfigRequiresModelAndAPIKey(t *testing.T) {
 	db := store.SetupTestDB(t)
 	extractor := NewExtractor(db)
 
-	_, _, err := extractor.resolveLLMConfig(context.Background(), ExtractRequest{
+	_, _, err := extractor.resolveLLMConfig(AllowGlobal(context.Background()), ExtractRequest{
 		LLMConfig: &model.LLMConfig{
-			Model: "",
+			Model:  "",
 			APIKey: "test-key",
 		},
 	})
@@ -59,4 +59,3 @@ func TestExtractor_ResolveLLMConfigRequiresModelAndAPIKey(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }
-

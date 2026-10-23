@@ -155,6 +155,33 @@ memory/
 
 详见 `model/memory.go` 与 `docs/memory.md`。
 
+## 隔离与删除（v0.4）
+
+写入/召回默认 **fail-closed**：必须显式声明身份，否则返回 `UNAUTHORIZED`。
+
+```go
+// 多租户：身份完整（tenant/user/session/agent 四项都要）
+ctx := memory.WithIsolation(context.Background(), tenantID, userID, sessionID, agentID)
+
+// 单用户 / 本地 / 维护任务：显式放开全局命名空间
+ctx := memory.AllowGlobal(context.Background())
+```
+
+刻意的行为变更与迁移方式见 [docs/p0-fixes.md](docs/p0-fixes.md)：
+提取缓存按隔离域分区、`Forget` 不再静默落到 transient、硬删除可配置为不留明文副本、
+`MinConfidence` 可关闭，等等。
+
+```go
+// 后台巡检（过期清理 + 归档保留期），宿主不必自己排定时任务
+janitor := memory.NewJanitor(svc, memory.JanitorConfig{Interval: time.Hour})
+janitor.Start(ctx)
+defer janitor.Stop()
+
+// 健康检查 / 运营指标
+stats, _ := svc.Stats(ctx)   // 条目数、按类型分布、索引是否同步、归档积压
+err := svc.Health(ctx)       // DB 可用 + 检索索引一致
+```
+
 ## 许可证
 
 MIT

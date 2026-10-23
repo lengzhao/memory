@@ -30,7 +30,7 @@ func TestDecisionEngine_ExecuteAddIsolation(t *testing.T) {
 	}
 
 	var count int64
-	if err := db.WithContext(context.Background()).
+	if err := db.WithContext(AllowGlobal(context.Background())).
 		Model(&model.MemoryItem{}).
 		Where("namespace_type = ? AND content = ?", model.NamespaceTypeTransient, "same content").
 		Count(&count).Error; err != nil {
@@ -120,7 +120,7 @@ func TestDecisionEngine_ExecuteUpdateIsolation(t *testing.T) {
 	}
 	decision := MemoryDecision{Decision: DecisionUpdate}
 
-	if err := de.executeUpdate(ctxS2, idS1, candidate, decision); err == nil {
+	if _, err := de.executeUpdate(ctxS2, idS1, candidate, decision); err == nil {
 		t.Fatal("expected update to be blocked across isolation boundary")
 	}
 }
@@ -130,7 +130,7 @@ func TestDecisionEngine_FindSimilarMemoriesUsesPolicyWeights(t *testing.T) {
 	svc := NewMemoryService(db)
 	de := NewDecisionEngine(db)
 	pm := NewPolicyManager(db)
-	ctx := context.Background()
+	ctx := AllowGlobal(context.Background())
 
 	_, err := svc.Remember(ctx, RememberRequest{
 		NamespaceType: model.NamespaceTypeKnowledge,
@@ -165,4 +165,3 @@ func TestDecisionEngine_FindSimilarMemoriesUsesPolicyWeights(t *testing.T) {
 		t.Fatalf("expected 0 similar memories when tag-only weights and no overlap, got %d", len(similar))
 	}
 }
-

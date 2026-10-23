@@ -61,7 +61,7 @@ func (tdb *TestDB) Cleanup() {
 
 // context returns a background context for tests
 func testContext() context.Context {
-	return context.Background()
+	return memory.AllowGlobal(context.Background())
 }
 
 func TestExtractE2E_RealLLM_DryRun(t *testing.T) {

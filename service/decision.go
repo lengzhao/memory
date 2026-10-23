@@ -19,17 +19,17 @@ import (
 type DecisionType string
 
 const (
-	DecisionAdd     DecisionType = "ADD"     // Add new memory
-	DecisionUpdate  DecisionType = "UPDATE"  // Update existing memory
-	DecisionDelete  DecisionType = "DELETE"  // Delete outdated memory
-	DecisionIgnore  DecisionType = "IGNORE"  // Ignore this candidate
-	DecisionMerge   DecisionType = "MERGE"   // Merge with existing memory
+	DecisionAdd    DecisionType = "ADD"    // Add new memory
+	DecisionUpdate DecisionType = "UPDATE" // Update existing memory
+	DecisionDelete DecisionType = "DELETE" // Delete outdated memory
+	DecisionIgnore DecisionType = "IGNORE" // Ignore this candidate
+	DecisionMerge  DecisionType = "MERGE"  // Merge with existing memory
 )
 
 // MemoryDecision represents the decision for a single memory candidate
 type MemoryDecision struct {
 	Decision      DecisionType `json:"decision"`
-	TargetID      string       `json:"target_id,omitempty"`      // Existing memory ID for UPDATE/DELETE/MERGE
+	TargetID      string       `json:"target_id,omitempty"` // Existing memory ID for UPDATE/DELETE/MERGE
 	Reason        string       `json:"reason"`
 	Confidence    float64      `json:"confidence"`
 	MergedContent string       `json:"merged_content,omitempty"` // For MERGE: merged content
@@ -46,16 +46,16 @@ type DecisionRequest struct {
 
 // SimilarMemory represents a potentially related existing memory
 type SimilarMemory struct {
-	ID          string  `json:"id"`
-	Namespace   string  `json:"namespace"`
-	Title       string  `json:"title"`
-	Content     string  `json:"content"`
-	Summary     string  `json:"summary"`
-	Tags        []string `json:"tags"`
-	Importance  int     `json:"importance"`
-	Confidence  float64 `json:"confidence"`
-	CreatedAt   string  `json:"created_at"`
-	Similarity  float64 `json:"similarity"` // 0-1 similarity score
+	ID         string   `json:"id"`
+	Namespace  string   `json:"namespace"`
+	Title      string   `json:"title"`
+	Content    string   `json:"content"`
+	Summary    string   `json:"summary"`
+	Tags       []string `json:"tags"`
+	Importance int      `json:"importance"`
+	Confidence float64  `json:"confidence"`
+	CreatedAt  string   `json:"created_at"`
+	Similarity float64  `json:"similarity"` // 0-1 similarity score
 }
 
 // DecisionResult contains all decisions
@@ -75,7 +75,7 @@ func NewDecisionEngine(db *gorm.DB) *DecisionEngine {
 	return &DecisionEngine{db: db}
 }
 
-// FindSimilarMemories finds existing memories similar to the candidate using FTS5 BM25
+// FindSimilarMemories finds existing memories similar to the candidate using FTS5 BM25.
 func (de *DecisionEngine) FindSimilarMemories(ctx context.Context, candidate ExtractedMemory, topK int) ([]SimilarMemory, error) {
 	if topK <= 0 {
 		topK = 5
@@ -88,52 +88,23 @@ func (de *DecisionEngine) FindSimilarMemories(ctx context.Context, candidate Ext
 		return nil, nil
 	}
 
-	// Use FTS5 with BM25 scoring for better relevance ranking
-	// BM25 considers term frequency and document length
-	var ftsResults []struct {
-		ItemID    string
-		BM25Score float64 // Lower is better for BM25 (0 = best match)
-	}
-
-	err := de.db.WithContext(ctx).Raw(`
-		SELECT 
-			fts_memory.item_id,
-			bm25(fts_memory) as bm25_score
-		FROM fts_memory 
-		WHERE fts_memory MATCH ? 
-		ORDER BY bm25_score
-		LIMIT ?
-	`, searchQuery, topK*2).Scan(&ftsResults).Error
-
-	if err != nil {
-		return nil, err
-	}
-
-	if len(ftsResults) == 0 {
+	// Candidate IDs are collected through the same FTS helper that Recall uses, so the
+	// relevance scale (BM25 -> similarity) stays consistent between recall and decision making.
+	tokenizedQuery := TokenizeQuery(searchQuery)
+	itemIDs, scores := de.searchCandidates(ctx, tokenizedQuery, topK*2)
+	if len(itemIDs) == 0 {
 		return nil, nil
-	}
-
-	// Fetch full items with scores
-	itemIDs := make([]string, len(ftsResults))
-	bm25Scores := make(map[string]float64)
-	for i, r := range ftsResults {
-		itemIDs[i] = r.ItemID
-		bm25Scores[r.ItemID] = r.BM25Score
 	}
 
 	query := de.db.WithContext(ctx).
 		Where("id IN ? AND status = ?", itemIDs, model.ItemStatusActive)
-	if isIsolationEnabled(ctx) {
-		meta, err := IsolationFromContext(ctx)
-		if err != nil {
-			return nil, err
-		}
-		query = query.Where("namespace IN ?", buildAllowedNamespaces(meta, []model.NamespaceType{candidate.Namespace}))
+	if HasIsolation(ctx) {
+		meta := IsolationFromContext(ctx)
+		query = query.Where("namespace IN ?", buildAllowedNamespaces(meta, namespaceTypeFilter(candidate.Namespace)))
 	}
 
 	var items []model.MemoryItem
-	err = query.Find(&items).Error
-	if err != nil {
+	if err := query.Find(&items).Error; err != nil {
 		return nil, err
 	}
 
@@ -145,12 +116,7 @@ func (de *DecisionEngine) FindSimilarMemories(ctx context.Context, candidate Ext
 	// Convert to SimilarMemory with combined similarity score
 	var similar []SimilarMemory
 	for _, item := range items {
-		bm25Score := bm25Scores[item.ID]
-
-		// BM25 score to similarity conversion
-		// BM25: lower is better, typical range 0-10
-		// Convert to 0-1 similarity where 1 is best
-		ftsSim := bm25ToSimilarity(bm25Score)
+		ftsSim := scores[item.ID]
 
 		// Calculate tag overlap as additional signal
 		tagSim := calculateTagOverlap(candidate.Tags, parseTags(item.TagsJSON))
@@ -158,7 +124,7 @@ func (de *DecisionEngine) FindSimilarMemories(ctx context.Context, candidate Ext
 		// Combined similarity: policy-driven weighted average.
 		finalSim := weights.FTSSimilarity*ftsSim + weights.TagOverlap*tagSim
 
-		if finalSim > 0.2 { // Lower threshold since BM25 is more accurate
+		if finalSim > 0.2 {
 			similar = append(similar, SimilarMemory{
 				ID:         item.ID,
 				Namespace:  item.Namespace,
@@ -187,6 +153,58 @@ func (de *DecisionEngine) FindSimilarMemories(ctx context.Context, candidate Ext
 	return similar, nil
 }
 
+// searchCandidates runs a BM25-ordered FTS5 query and maps each hit to a 0-1 similarity.
+func (de *DecisionEngine) searchCandidates(ctx context.Context, tokenizedQuery string, limit int) ([]string, map[string]float64) {
+	tokens := strings.Fields(tokenizedQuery)
+	if len(tokens) == 0 {
+		return nil, nil
+	}
+
+	var orQuery strings.Builder
+	for _, token := range tokens {
+		token = strings.ReplaceAll(token, "\"", "")
+		if token == "" {
+			continue
+		}
+		if orQuery.Len() > 0 {
+			orQuery.WriteString(" OR ")
+		}
+		orQuery.WriteString("\"" + token + "\"")
+	}
+	if orQuery.Len() == 0 {
+		return nil, nil
+	}
+
+	var ftsResults []struct {
+		ItemID        string
+		TokenizedText string
+		BM25Score     float64
+	}
+	err := de.db.WithContext(ctx).Raw(`
+		SELECT item_id,
+		       tokenized_content AS tokenized_text,
+		       bm25(fts_memory) AS bm25_score
+		FROM fts_memory
+		WHERE fts_memory MATCH ?
+		ORDER BY bm25_score
+		LIMIT ?
+	`, orQuery.String(), limit).Scan(&ftsResults).Error
+	if err != nil {
+		return nil, nil
+	}
+
+	itemIDs := make([]string, 0, len(ftsResults))
+	scores := make(map[string]float64, len(ftsResults))
+	for _, r := range ftsResults {
+		if !containsFullToken(r.TokenizedText, tokens) {
+			continue
+		}
+		itemIDs = append(itemIDs, r.ItemID)
+		scores[r.ItemID] = bm25ToSimilarity(r.BM25Score)
+	}
+	return itemIDs, scores
+}
+
 type decisionSimilarityWeights struct {
 	FTSSimilarity float64
 	TagOverlap    float64
@@ -195,11 +213,7 @@ type decisionSimilarityWeights struct {
 func (de *DecisionEngine) similarityWeightsForCandidate(ctx context.Context, nsType model.NamespaceType) (decisionSimilarityWeights, error) {
 	namespace := buildDefaultNamespace(nsType)
 	if isIsolationEnabled(ctx) {
-		meta, err := IsolationFromContext(ctx)
-		if err != nil {
-			return decisionSimilarityWeights{}, err
-		}
-		namespace = buildNamespace(meta, nsType)
+		namespace = buildNamespace(IsolationFromContext(ctx), nsType)
 	}
 
 	pm := NewPolicyManager(de.db)
@@ -435,14 +449,22 @@ func (de *DecisionEngine) callDecisionLLM(ctx context.Context, cfg model.LLMConf
 	return result.Decisions, apiResp.Usage.TotalTokens, nil
 }
 
-// ExecuteDecisions executes the decisions and returns the results
+// ExecuteDecisions executes the decisions and returns the results.
+//
+// Decisions that point at an existing memory are applied through MemoryService, so they keep
+// the same invariants as the normal write path: re-tokenization for the search index, optimistic
+// version bumps, callbacks and audit events. Previously this path updated rows directly and
+// silently left the FTS index pointing at the previous content.
+//
+// DELETE is honoured in soft form only: an LLM-proposed destructive action performs reversible
+// removal (status=deleted), never erasure.
 func (de *DecisionEngine) ExecuteDecisions(ctx context.Context, candidates []ExtractedMemory, decisions []MemoryDecision) (*ExecutionResult, error) {
 	result := &ExecutionResult{
-		Added:    []string{},
-		Updated:  []string{},
-		Deleted:  []string{},
-		Ignored:  []string{},
-		Merged:   []string{},
+		Added:   []string{},
+		Updated: []string{},
+		Deleted: []string{},
+		Ignored: []string{},
+		Merged:  []string{},
 	}
 
 	if len(decisions) != len(candidates) {
@@ -466,11 +488,11 @@ func (de *DecisionEngine) ExecuteDecisions(ctx context.Context, candidates []Ext
 				result.Errors = append(result.Errors, fmt.Sprintf("UPDATE missing target_id for %s", candidate.TempID))
 				continue
 			}
-			err := de.executeUpdate(ctx, decision.TargetID, candidate, decision)
+			id, err := de.executeUpdate(ctx, decision.TargetID, candidate, decision)
 			if err != nil {
 				result.Errors = append(result.Errors, fmt.Sprintf("UPDATE failed for %s: %v", candidate.TempID, err))
 			} else {
-				result.Updated = append(result.Updated, decision.TargetID)
+				result.Updated = append(result.Updated, id)
 			}
 
 		case DecisionDelete:
@@ -478,11 +500,11 @@ func (de *DecisionEngine) ExecuteDecisions(ctx context.Context, candidates []Ext
 				result.Errors = append(result.Errors, fmt.Sprintf("DELETE missing target_id for %s", candidate.TempID))
 				continue
 			}
-			err := de.executeDelete(ctx, decision.TargetID)
+			id, err := de.executeDelete(ctx, decision.TargetID, candidate, decision)
 			if err != nil {
 				result.Errors = append(result.Errors, fmt.Sprintf("DELETE failed for %s: %v", candidate.TempID, err))
 			} else {
-				result.Deleted = append(result.Deleted, decision.TargetID)
+				result.Deleted = append(result.Deleted, id)
 			}
 
 		case DecisionMerge:
@@ -538,66 +560,78 @@ func (de *DecisionEngine) executeAdd(ctx context.Context, candidate ExtractedMem
 	})
 }
 
-func (de *DecisionEngine) executeUpdate(ctx context.Context, targetID string, candidate ExtractedMemory, decision MemoryDecision) error {
-	query, err := de.scopedTargetQuery(ctx, targetID, candidate.Namespace)
-	if err != nil {
-		return err
-	}
-
-	updates := map[string]interface{}{
-		"content":    candidate.Content,
-		"title":      candidate.Title,
-		"summary":    candidate.Summary,
-		"tags_json":  toJSON(candidate.Tags),
-		"updated_at": time.Now(),
-		"version":    gorm.Expr("version + 1"),
-	}
-
-	if decision.NewImportance > 0 {
-		updates["importance"] = decision.NewImportance
-	}
-
-	result := query.Updates(updates)
-	if result.Error != nil {
-		return result.Error
-	}
-	if result.RowsAffected == 0 {
-		return fmt.Errorf("target memory not found: %s", targetID)
-	}
-
-	return nil
-}
-
-func (de *DecisionEngine) executeDelete(ctx context.Context, targetID string) error {
-	query := de.db.WithContext(ctx).Model(&model.MemoryItem{}).Where("id = ?", targetID)
-	if isIsolationEnabled(ctx) {
-		meta, err := IsolationFromContext(ctx)
-		if err != nil {
-			return err
-		}
-		query = query.Where("namespace IN ?", buildAllowedNamespaces(meta, nil))
-	}
-
-	result := query.Update("status", model.ItemStatusDeleted)
-
-	if result.Error != nil {
-		return result.Error
-	}
-	if result.RowsAffected == 0 {
-		return fmt.Errorf("target memory not found: %s", targetID)
-	}
-
-	return nil
-}
-
-func (de *DecisionEngine) executeMerge(ctx context.Context, targetID string, candidate ExtractedMemory, decision MemoryDecision) (string, error) {
-	// Get existing memory
-	var existing model.MemoryItem
-	scopedQuery, err := de.scopedTargetQuery(ctx, targetID, candidate.Namespace)
+// executeUpdate rewrites an existing memory through MemoryService so the version bump,
+// re-tokenization, callbacks and audit events all match the regular write path.
+func (de *DecisionEngine) executeUpdate(ctx context.Context, targetID string, candidate ExtractedMemory, decision MemoryDecision) (string, error) {
+	memory, err := de.loadTarget(ctx, targetID, candidate)
 	if err != nil {
 		return "", err
 	}
-	if err := scopedQuery.First(&existing).Error; err != nil {
+
+	req := UpdateRequest{ItemID: memory.ID, ExpectedVersion: memory.Version}
+	title := candidate.Title
+	content := candidate.Content
+	if strings.TrimSpace(title) != "" {
+		req.Title = &title
+	}
+	if strings.TrimSpace(content) != "" {
+		req.Content = &content
+	}
+	if strings.TrimSpace(candidate.Summary) != "" {
+		req.Summary = &candidate.Summary
+	}
+	if len(candidate.Tags) > 0 {
+		req.Tags = candidate.Tags
+	}
+	if decision.NewImportance > 0 {
+		req.Importance = &decision.NewImportance
+	}
+
+	// The target was already scoped by loadTarget; re-derive an isolation context from its
+	// namespace so the service can enforce the same boundary when the caller passed none.
+	svcCtx := deriveIsolationContext(ctx, memory.Namespace)
+	if err := NewMemoryService(de.db).Update(svcCtx, req); err != nil {
+		return "", err
+	}
+	return memory.ID, nil
+}
+
+// executeDelete soft-deletes the target (reversible), through Forget so the FTS index is
+// pruned and the deletion is audited.
+func (de *DecisionEngine) executeDelete(ctx context.Context, targetID string, candidate ExtractedMemory, decision MemoryDecision) (string, error) {
+	memory, err := de.loadTarget(ctx, targetID, candidate)
+	if err != nil {
+		return "", err
+	}
+	svcCtx := deriveIsolationContext(ctx, memory.Namespace)
+	if _, err := NewMemoryService(de.db).Forget(svcCtx, ForgetRequest{
+		ItemIDs: []string{memory.ID},
+		Mode:    "soft",
+		Reason:  decision.Reason,
+	}); err != nil {
+		return "", err
+	}
+	return memory.ID, nil
+}
+
+// loadTarget resolves and scopes an existing memory before mutating it. The candidate's
+// namespace type is authoritative: destructive decisions from the model cannot reach outside
+// the namespace the candidate was classified into.
+func (de *DecisionEngine) loadTarget(ctx context.Context, targetID string, candidate ExtractedMemory) (model.MemoryItem, error) {
+	query, err := de.scopedTargetQuery(ctx, targetID, candidate.Namespace)
+	if err != nil {
+		return model.MemoryItem{}, err
+	}
+	var memory model.MemoryItem
+	if err := query.First(&memory).Error; err != nil {
+		return model.MemoryItem{}, fmt.Errorf("target memory not found: %s: %w", targetID, err)
+	}
+	return memory, nil
+}
+
+func (de *DecisionEngine) executeMerge(ctx context.Context, targetID string, candidate ExtractedMemory, decision MemoryDecision) (string, error) {
+	existing, err := de.loadTarget(ctx, targetID, candidate)
+	if err != nil {
 		return "", err
 	}
 
@@ -628,46 +662,42 @@ func (de *DecisionEngine) executeMerge(ctx context.Context, targetID string, can
 		newImportance = candidate.Importance
 	}
 
-	updates := map[string]interface{}{
-		"title":       mergedTitle,
-		"content":     mergedContent,
-		"tags_json":   toJSON(mergedTags),
-		"importance":  newImportance,
-		"updated_at":  time.Now(),
-		"version":     gorm.Expr("version + 1"),
-		"confidence":  (existing.Confidence + candidate.Confidence) / 2,
-	}
+	mergedConfidence := (existing.Confidence + candidate.Confidence) / 2
 
+	// Write through MemoryService: re-tokenization, version bump, callbacks, audit.
+	svcCtx := deriveIsolationContext(ctx, existing.Namespace)
+	req := UpdateRequest{
+		ItemID:          existing.ID,
+		Title:           &mergedTitle,
+		Content:         &mergedContent,
+		Tags:            mergedTags,
+		Importance:      &newImportance,
+		Confidence:      &mergedConfidence,
+		ExpectedVersion: existing.Version,
+	}
 	if candidate.Summary != "" {
-		updates["summary"] = candidate.Summary
+		req.Summary = &candidate.Summary
 	}
-
-	updateQuery, err := de.scopedTargetQuery(ctx, targetID, candidate.Namespace)
-	if err != nil {
+	if err := NewMemoryService(de.db).Update(svcCtx, req); err != nil {
 		return "", err
-	}
-	result := updateQuery.Updates(updates)
-	if result.Error != nil {
-		return "", result.Error
-	}
-	if result.RowsAffected == 0 {
-		return "", fmt.Errorf("target memory not found: %s", targetID)
 	}
 
 	// Create merge record for tracking
 	mergeRecord := model.MemoryMerge{
-		ID:              model.GenerateID(),
-		TargetID:        targetID,
-		SourceContent:   candidate.Content,
-		SourceTitle:     candidate.Title,
-		MergedContent:   mergedContent,
-		MergedTitle:     mergedTitle,
-		SourceDialogID:  "", // Will be set by caller if available
-		CreatedAt:       time.Now(),
+		ID:             model.GenerateID(),
+		TargetID:       existing.ID,
+		SourceContent:  candidate.Content,
+		SourceTitle:    candidate.Title,
+		MergedContent:  mergedContent,
+		MergedTitle:    mergedTitle,
+		SourceDialogID: "", // Will be set by caller if available
+		CreatedAt:      time.Now(),
 	}
-	de.db.Create(&mergeRecord)
+	if err := de.db.WithContext(ctx).Create(&mergeRecord).Error; err != nil {
+		GetLogger().Warn("failed to record memory merge", "error", err, "target_id", existing.ID)
+	}
 
-	return targetID, nil
+	return existing.ID, nil
 }
 
 func (de *DecisionEngine) scopedTargetQuery(ctx context.Context, targetID string, nsType model.NamespaceType) (*gorm.DB, error) {
@@ -677,16 +707,8 @@ func (de *DecisionEngine) scopedTargetQuery(ctx context.Context, targetID string
 	if nsType != "" {
 		query = query.Where("namespace_type = ?", nsType)
 	}
-	if isIsolationEnabled(ctx) {
-		meta, err := IsolationFromContext(ctx)
-		if err != nil {
-			return nil, err
-		}
-		if nsType != "" {
-			query = query.Where("namespace IN ?", buildAllowedNamespaces(meta, []model.NamespaceType{nsType}))
-		} else {
-			query = query.Where("namespace IN ?", buildAllowedNamespaces(meta, nil))
-		}
+	if HasIsolation(ctx) {
+		query = query.Where("namespace IN ?", buildAllowedNamespaces(IsolationFromContext(ctx), namespaceTypeFilter(nsType)))
 	}
 	return query, nil
 }

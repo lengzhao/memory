@@ -40,7 +40,7 @@ func TestApplyPostExtractPipeline_minConfidenceAndPolicy(t *testing.T) {
 		{Namespace: model.NamespaceTypeTransient, Title: "当前时间", Summary: "UTC", Confidence: 0.99},
 		{Namespace: model.NamespaceTypeKnowledge, Title: "ok", Confidence: 0.9},
 	}
-	out, err := applyPostExtractPipeline(context.Background(), mem, ExtractRequest{
+	out, err := applyPostExtractPipeline(AllowGlobal(context.Background()), mem, ExtractRequest{
 		MinConfidence: 0.7,
 		ExtractPolicy: &ExtractPolicy{DropTransientEphemeral: true},
 	})
@@ -57,7 +57,7 @@ func TestApplyPostExtractPipeline_postHook(t *testing.T) {
 		{Namespace: model.NamespaceTypeKnowledge, Title: "a", Confidence: 0.9},
 		{Namespace: model.NamespaceTypeKnowledge, Title: "b", Confidence: 0.9},
 	}
-	out, err := applyPostExtractPipeline(context.Background(), mem, ExtractRequest{
+	out, err := applyPostExtractPipeline(AllowGlobal(context.Background()), mem, ExtractRequest{
 		MinConfidence: 0.5,
 		PostExtractHook: func(_ context.Context, m []ExtractedMemory) ([]ExtractedMemory, error) {
 			return m[:1], nil

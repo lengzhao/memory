@@ -13,7 +13,7 @@ func TestSummaryGenerator_GenerateItemSummary(t *testing.T) {
 	db := store.SetupTestDB(t)
 	svc := NewMemoryService(db)
 	sum := NewSummaryGenerator(db)
-	ctx := context.Background()
+	ctx := AllowGlobal(context.Background())
 
 	t.Run("generate summary for item", func(t *testing.T) {
 		// Create item with long content
@@ -54,7 +54,7 @@ func TestSummaryGenerator_GenerateNamespaceSummary(t *testing.T) {
 	db := store.SetupTestDB(t)
 	svc := NewMemoryService(db)
 	sum := NewSummaryGenerator(db)
-	ctx := context.Background()
+	ctx := AllowGlobal(context.Background())
 
 	t.Run("generate namespace summary", func(t *testing.T) {
 		// Create multiple items

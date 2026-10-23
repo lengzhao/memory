@@ -24,6 +24,9 @@ profile.cov
 go.work
 go.work.sum
 
+# CodeGraph index (local tooling artifact)
+.codegraph/
+
 # env file
 .env
 
