@@ -117,6 +117,7 @@ func Migrate(db *gorm.DB) error {
 		&model.MemoryEvent{},
 		&model.DeletedItem{},
 		&model.DialogExtraction{},
+		&model.SessionSummary{},
 		&model.MemoryMerge{},
 		// fts_memory: virtual table, created in installFTS5
 	}

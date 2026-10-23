@@ -121,6 +121,7 @@ type (
 	ForgetRequest   = service.ForgetRequest
 	UpdateRequest   = service.UpdateRequest
 	RecallBudget    = service.RecallBudget
+	SessionSummary  = service.SessionSummary
 	ContextBundle   = service.ContextBundle
 	BundleItem      = service.BundleItem
 	NamespaceDigest = service.NamespaceDigest

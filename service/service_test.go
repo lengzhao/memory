@@ -1814,28 +1814,31 @@ func TestRemember_DefaultConfidenceIsRecallable(t *testing.T) {
 	}
 }
 
-// ---- BM25 mapping ---------------------------------------------------------------------------
+// ---- Text relevance -------------------------------------------------------------------------
 
-func TestBM25ToSimilarity_MapsNegatedScores(t *testing.T) {
-	// SQLite returns negative values where more negative is better. The mapping must be monotone:
-	// a better (more negative) score yields a higher similarity.
-	strong := bm25ToSimilarity(-2.0)
-	weak := bm25ToSimilarity(-0.5)
-	none := bm25ToSimilarity(0)
+func TestTokenCoverage_IsCorpusIndependentAndMonotone(t *testing.T) {
+	query := []string{"sqlite", "并发", "读"}
 
-	if !(strong > weak && weak > none) {
-		t.Fatalf("expected monotone similarity, got strong=%v weak=%v none=%v", strong, weak, none)
+	full := tokenCoverage(query, "sqlite wal 并发 读 写")
+	partial := tokenCoverage(query, "sqlite 索引")
+	none := tokenCoverage(query, "冬天 适合 喝 热酒")
+
+	if full != 1.0 {
+		t.Fatalf("expected full coverage for a memory containing every query token, got %v", full)
 	}
-	if strong >= 1 || weak <= 0 {
-		t.Fatalf("expected an open (0,1) range, got strong=%v weak=%v", strong, weak)
+	if !(full > partial && partial > none) {
+		t.Fatalf("expected monotone coverage, got full=%v partial=%v none=%v", full, partial, none)
 	}
-	// A row that merely shares one token must not score as high as a strong textual match: this is
-	// the discrimination that a "<= 0 => 1.0" rule destroyed.
-	if strong-weak < 0.2 {
-		t.Fatalf("expected clear separation between strong and weak matches, got %v vs %v", strong, weak)
+	if none != 0 {
+		t.Fatalf("expected zero coverage for an unrelated memory, got %v", none)
 	}
-	// The scale is absolute, not relative to the result set, so repeated calls agree.
-	if bm25ToSimilarity(-2.0) != strong {
-		t.Fatal("expected a deterministic, query-independent mapping")
+
+	// Unlike FTS5's IDF-weighted bm25(), coverage does not depend on how many documents exist:
+	// a perfect match scores 1.0 even when it is the only document in the database.
+	if got := tokenCoverage([]string{"喝茶"}, "喝茶"); got != 1.0 {
+		t.Fatalf("expected 1.0 for a single-document perfect match, got %v", got)
+	}
+	if got := tokenCoverage(nil, "anything"); got != 0 {
+		t.Fatalf("expected 0 for an empty query, got %v", got)
 	}
 }

@@ -129,6 +129,18 @@ type ExtractRequest struct {
 	// ExtractPolicy applies extra filtering after MinConfidence (e.g. transient ephemeral cues).
 	ExtractPolicy *ExtractPolicy
 
+	// RollSessionSummary asks the model to also refresh the session digest in the same call: the
+	// previous digest is handed to it as input and the revised one is stored. It costs no extra
+	// request, so a host that already extracts every turn can keep the digest current for free.
+	// The digest is written before the memories are persisted, so it survives a persist failure.
+	RollSessionSummary bool
+
+	// previousSessionSummary is the stored digest handed back to the model for integration. It is
+	// filled in by Extract from the session record; callers never set it.
+	previousSessionSummary string
+	// sessionSummaryRecord is the digest produced by this call, if any.
+	sessionSummaryRecord *SessionSummary
+
 	// PostExtractHook runs after MinConfidence and ExtractPolicy, before persistence.
 	PostExtractHook func(ctx context.Context, mem []ExtractedMemory) ([]ExtractedMemory, error)
 }
@@ -154,6 +166,10 @@ type ExtractResult struct {
 	Memories       []ExtractedMemory
 	TotalTokens    int
 	ProcessingTime int // ms
+
+	// SessionSummary is the refreshed conversation digest (when RollSessionSummary was requested and
+	// the session had one, or the model produced one).
+	SessionSummary *SessionSummary `json:"session_summary_record,omitempty"`
 
 	// Decision engine results (when UseDecisionEngine is true)
 	DecisionResult *DecisionExecutionSummary `json:"decision_result,omitempty"`
@@ -204,13 +220,22 @@ func (e *Extractor) Extract(ctx context.Context, scope Scope, req ExtractRequest
 			if perr != nil {
 				return nil, perr
 			}
-			return &ExtractResult{
+			cached := &ExtractResult{
 				ExtractionID:   existing.ID,
 				Status:         "cached",
 				Memories:       filtered,
 				TotalTokens:    valueOrZero(existing.TotalTokens),
 				ProcessingTime: valueOrZero(existing.ProcessingTimeMs),
-			}, nil
+			}
+			if req.RollSessionSummary {
+				// Not a new digest (the model was not called), but the host should still see the
+				// session's current narrative.
+				current, serr := NewMemoryService(e.db).loadSessionSummary(ctx, scope)
+				if serr == nil {
+					cached.SessionSummary = current
+				}
+			}
+			return cached, nil
 		}
 		if !errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil, fmt.Errorf("failed to query recent extraction cache: %w", err)
@@ -273,7 +298,17 @@ func (e *Extractor) Extract(ctx context.Context, scope Scope, req ExtractRequest
 		return nil, fmt.Errorf("failed to create extraction record: %w", err)
 	}
 
-	memories, tokens, err := e.callOpenAI(ctx, llmConfig, prompt, req)
+	if req.RollSessionSummary {
+		existing, serr := NewMemoryService(e.db).loadSessionSummary(ctx, scope)
+		if serr != nil {
+			return nil, serr
+		}
+		if existing != nil {
+			req.previousSessionSummary = existing.Summary
+		}
+	}
+
+	memories, sessionSummaryText, tokens, err := e.callOpenAI(ctx, llmConfig, prompt, req)
 	if err != nil {
 		errMsg := err.Error()
 		now := time.Now()
@@ -282,6 +317,17 @@ func (e *Extractor) Extract(ctx context.Context, scope Scope, req ExtractRequest
 		exRec.CompletedAt = &now
 		e.db.WithContext(ctx).Save(&exRec)
 		return nil, fmt.Errorf("LLM extraction failed: %w", err)
+	}
+
+	// Persist the digest before the memories: a failed persist below must not cost the session its
+	// updated narrative, and a dry run still shows the host what the digest would be.
+	if req.RollSessionSummary && strings.TrimSpace(sessionSummaryText) != "" {
+		record, serr := NewMemoryService(e.db).writeSessionSummary(ctx, scope, sessionSummaryText, model.SessionSummarySourceLLM, -1)
+		if serr != nil {
+			GetLogger().Warn("failed to store session summary", "error", serr)
+		} else {
+			req.sessionSummaryRecord = record
+		}
 	}
 
 	filtered, err := applyPostExtractPipeline(ctx, memories, req)
@@ -320,6 +366,14 @@ func (e *Extractor) Extract(ctx context.Context, scope Scope, req ExtractRequest
 	}
 
 	// If not dry run, persist memories to database
+	// A dry run still reports the digest it produced: the host is previewing what the model would do,
+	// and the digest is part of that.
+	if req.DryRun && req.sessionSummaryRecord == nil && req.RollSessionSummary {
+		if current, serr := NewMemoryService(e.db).loadSessionSummary(ctx, scope); serr == nil {
+			req.sessionSummaryRecord = current
+		}
+	}
+
 	var decisionSummary *DecisionExecutionSummary
 	if !req.DryRun {
 		if req.UseDecisionEngine {
@@ -356,6 +410,7 @@ func (e *Extractor) Extract(ctx context.Context, scope Scope, req ExtractRequest
 		Memories:       filtered,
 		TotalTokens:    totalTokens,
 		ProcessingTime: processingTime,
+		SessionSummary: req.sessionSummaryRecord,
 		DecisionResult: decisionSummary,
 	}, nil
 }
@@ -438,8 +493,12 @@ func callLLM(ctx context.Context, cfg model.LLMConfig, messages []openAIMessage,
 
 // callOpenAI calls the OpenAI API to extract memories from dialog
 // Returns extracted memories, total token count, and error if any
-func (e *Extractor) callOpenAI(ctx context.Context, cfg model.LLMConfig, prompt model.ExtractionPrompt, req ExtractRequest) ([]ExtractedMemory, int, error) {
-	userPrompt := buildExtractionUserPrompt(req)
+// callOpenAI extracts memories from dialog, and the session digest when it was requested.
+//
+// Both come back from the same request: rolling the digest is a field in the response, not a second
+// API call, so keeping a session summary current costs nothing beyond a few output tokens.
+func (e *Extractor) callOpenAI(ctx context.Context, cfg model.LLMConfig, prompt model.ExtractionPrompt, req ExtractRequest) ([]ExtractedMemory, string, int, error) {
+	userPrompt := buildExtractionUserPrompt(req, req.previousSessionSummary)
 	messages := []openAIMessage{
 		{Role: "system", Content: prompt.SystemPrompt},
 		{Role: "user", Content: userPrompt},
@@ -447,32 +506,43 @@ func (e *Extractor) callOpenAI(ctx context.Context, cfg model.LLMConfig, prompt 
 
 	apiResp, err := callLLM(ctx, cfg, messages, cfg.Temperature)
 	if err != nil {
-		return nil, 0, err
+		return nil, "", 0, err
 	}
 
 	content := apiResp.Choices[0].Message.Content
 
-	// The response should be a JSON object with a "memories" key or directly an array
-	// Try to parse as object first (expected format: {"memories": [...]})
-	var result struct {
-		Memories []ExtractedMemory `json:"memories"`
+	// Expected shape: {"memories": [...], "session_summary": "..."}.
+	//
+	// The envelope is accepted whenever it is a JSON object carrying either key: a turn can legitimately
+	// yield no memories while still producing a session digest ("memories": []), and treating that as
+	// a parse failure would silently drop the digest.
+	var envelope struct {
+		Memories       *[]ExtractedMemory `json:"memories"`
+		SessionSummary *string            `json:"session_summary"`
 	}
-	if err := json.Unmarshal([]byte(content), &result); err == nil && len(result.Memories) > 0 {
-		return result.Memories, apiResp.Usage.TotalTokens, nil
+	if err := json.Unmarshal([]byte(content), &envelope); err == nil && (envelope.Memories != nil || envelope.SessionSummary != nil) {
+		memories := []ExtractedMemory{}
+		if envelope.Memories != nil {
+			memories = *envelope.Memories
+		}
+		summary := ""
+		if envelope.SessionSummary != nil {
+			summary = strings.TrimSpace(*envelope.SessionSummary)
+		}
+		return memories, summary, apiResp.Usage.TotalTokens, nil
 	}
 
-	// Try to parse as direct array
+	// A model that emitted a bare array of memories, or a single memory object.
 	var memories []ExtractedMemory
 	if err := json.Unmarshal([]byte(content), &memories); err != nil {
-		// If both fail, try to wrap in an array
 		var singleMemory ExtractedMemory
 		if err := json.Unmarshal([]byte(content), &singleMemory); err != nil {
-			return nil, apiResp.Usage.TotalTokens, fmt.Errorf("failed to parse LLM output as memories: %w", err)
+			return nil, "", apiResp.Usage.TotalTokens, fmt.Errorf("failed to parse LLM output as memories: %w", err)
 		}
 		memories = []ExtractedMemory{singleMemory}
 	}
 
-	return memories, apiResp.Usage.TotalTokens, nil
+	return memories, "", apiResp.Usage.TotalTokens, nil
 }
 
 // persistMemory saves extracted memory to database
@@ -661,7 +731,7 @@ func calculateHash(text string) string {
 // buildExtractionUserPrompt injects reference time, optional time zone, and entity context.
 // These runtime values are combined with the system prompt (defined in extraction_defaults.go)
 // which already contains the classification rules and output format.
-func buildExtractionUserPrompt(req ExtractRequest) string {
+func buildExtractionUserPrompt(req ExtractRequest, previousSessionSummary string) string {
 	ref := time.Now()
 	if req.ReferenceTime != nil {
 		ref = *req.ReferenceTime
@@ -686,6 +756,21 @@ func buildExtractionUserPrompt(req ExtractRequest) string {
 		sb.WriteString("\n## Entity context (for disambiguating 他/她/经理, etc.)\n")
 		sb.WriteString(strings.TrimSpace(req.ResolutionContext))
 		sb.WriteString("\n")
+	}
+
+	if req.RollSessionSummary {
+		sb.WriteString("\n## SESSION SUMMARY REQUEST\n")
+		sb.WriteString("A separate system keeps the running digest of this conversation. Return an updated digest in\n")
+		sb.WriteString("the \"session_summary\" field: what the user is working on, decisions already made, constraints\n")
+		sb.WriteString("and open questions. Integrate the previous digest below with the new dialog instead of\n")
+		sb.WriteString("restating only the newest message. Keep it to a few sentences, in the language of the dialog.\n")
+		if strings.TrimSpace(previousSessionSummary) != "" {
+			sb.WriteString("\n## Previous session summary (integrate this)\n")
+			sb.WriteString(strings.TrimSpace(previousSessionSummary))
+			sb.WriteString("\n")
+		} else {
+			sb.WriteString("\n(There is no previous digest: this is the first one.)\n")
+		}
 	}
 
 	sb.WriteString("\n## Dialog to analyze\n")

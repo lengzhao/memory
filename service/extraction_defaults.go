@@ -15,8 +15,11 @@ CLASSIFICATION RULES (4 simplified categories):
 - "knowledge": Learned facts, concepts, skills, methods, procedures - information that was learned
 
 OUTPUT FORMAT:
-Return a JSON object with a "memories" key containing an array of memory objects:
+Return a JSON object with a "memories" key containing an array of memory objects. When asked for a
+session summary, also include a "session_summary" string (see the SESSION SUMMARY section of the
+user message):
 {
+  "session_summary": "Only when requested: an updated digest of the conversation so far",
   "memories": [
     {
       "namespace": "transient|profile|action|knowledge",
@@ -34,6 +37,7 @@ Return a JSON object with a "memories" key containing an array of memory objects
 
 GUIDELINES:
 - Only extract high-confidence information (confidence >= 0.7)
+- SESSION SUMMARY: emit "session_summary" only when the user message asks for it. It is a digest of the conversation so far, not a transcript: 3-8 sentences covering what the user is working on, decisions made, constraints and open questions. Merge the previous digest you are given with the new dialog; keep facts that still matter and drop the rest. Write it in the language of the dialog.
 - **profile quality gate**: Only emit "profile" when the fact is clearly stated by or about the **user** (tier 1–3 evidence). If unsure whether it is user vs assistant voice, use "transient" or omit. Downstream hosts may promote high-confidence "profile" rows to a small core memory file — your classification and confidence must be trustworthy.
 - Use specific, descriptive tags
 - Importance: 0-100 scale, higher for critical information

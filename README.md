@@ -209,6 +209,33 @@ stats, _ := svc.Stats(ctx)   // 条目分布、索引是否同步、归档积压
 err := svc.Health(ctx)
 ```
 
+### 会话滚动摘要
+
+会话摘要 = "这段对话到目前为止聊了什么"。开启 `RollSessionSummary` 后，**提取的同一次 LLM 请求**
+即可产出并滚动它（零额外调用）；前端也可以自己写。
+
+```go
+// 提取时顺带刷新（推荐）：模型在同一个请求里返回 session_summary
+result, _ := extractor.Extract(ctx, scope, memory.ExtractRequest{
+    DialogText:         turn,
+    LLMConfig:          cfg,
+    RollSessionSummary: true,
+})
+result.SessionSummary // {Summary, Revision, Source: "llm", ...}
+
+// 前端自己摘要
+svc.SetSessionSummary(ctx, scope, "用户在修复检索排序…")
+
+// 装配时带上（放在记忆块之前）
+bundle, _ := svc.RecallContext(ctx, scope, req, memory.RecallBudget{
+    IncludeSessionSummary:   true,
+    SessionSummaryMaxTokens: 200,
+})
+```
+
+三种来源：`llm`（同一个提取请求）、`host`（前端写入）、`rollup`（本地确定性聚合兜底）。
+库**永不主动调用 LLM**；`session_summaries` 按 `(scope, session)` 隔离。
+
 ### 上下文装配（按预算召回）
 
 ```go

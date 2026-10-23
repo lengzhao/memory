@@ -30,6 +30,15 @@ type RecallBudget struct {
 	IncludeNamespaceSummary bool
 	// NamespaceSummaryMaxTokens caps the space the digests may take.
 	NamespaceSummaryMaxTokens int
+	// IncludeSessionSummary prepends the rolling digest of the caller's session: what the
+	// conversation has been about so far. Placed first because a model reads it as "context before
+	// this turn". NoSessionRollup disables the deterministic fallback for sessions without one.
+	IncludeSessionSummary bool
+	// SessionSummaryMaxTokens caps the space the session digest may take.
+	SessionSummaryMaxTokens int
+	// NoSessionRollup skips building a deterministic session digest when none has been produced yet
+	// (LLM- or host-written). Without it, EnsureSessionSummary fills the gap locally.
+	NoSessionRollup bool
 	// Formalizer turns the selected memories into the final text. Defaults to a compact listing.
 	// It receives the rows in rank order.
 	Formalizer func(ctx context.Context, hits []MemoryHit) string
@@ -45,6 +54,8 @@ type ContextBundle struct {
 	Items []BundleItem
 	// NamespaceSummaries are the digests appended to Text (when requested).
 	NamespaceSummaries []NamespaceDigest
+	// SessionSummary is the conversation digest prepended to Text (when requested).
+	SessionSummary *SessionSummary
 	// Candidates is the number of memories considered before budgeting.
 	Candidates int
 	// Truncated reports whether the budget dropped or shortened memories.
@@ -173,13 +184,54 @@ func (s *MemoryService) buildBundle(ctx context.Context, scope Scope, hits []Mem
 		bundle.NamespaceSummaries = digests
 	}
 
+	if budget.IncludeSessionSummary {
+		sessionSummary, err := s.sessionSummaryForBundle(ctx, scope, budget)
+		if err != nil {
+			return nil, err
+		}
+		bundle.SessionSummary = sessionSummary
+	}
+
 	bundle.Text = s.formatBundle(ctx, bundle, budget)
 	bundle.Tokens = tokenCounter(bundle.Text)
 	return bundle, nil
 }
 
+// sessionSummaryForBundle resolves the session digest for a bundle, trimming it to its budget.
+func (s *MemoryService) sessionSummaryForBundle(ctx context.Context, scope Scope, budget RecallBudget) (*SessionSummary, error) {
+	if scope.IsGlobal() {
+		// The global scope has no conversation; a digest there would be shared across callers.
+		return nil, nil
+	}
+
+	var (
+		summary *SessionSummary
+		err     error
+	)
+	if budget.NoSessionRollup {
+		summary, err = s.loadSessionSummary(ctx, scope)
+	} else {
+		summary, err = s.EnsureSessionSummary(ctx, scope, budget.SessionSummaryMaxTokens)
+	}
+	if err != nil || summary == nil {
+		return nil, err
+	}
+
+	if budget.SessionSummaryMaxTokens > 0 {
+		summary.Summary = trimToTokens(summary.Summary, budget.SessionSummaryMaxTokens)
+		summary.TokenCount = tokenCounter(summary.Summary)
+	}
+	if strings.TrimSpace(summary.Summary) == "" {
+		return nil, nil
+	}
+	return summary, nil
+}
+
 // bundleHeader is the heading prepended to the memory list.
 const bundleHeader = "## Memories\n"
+
+// sessionSummaryHeading introduces the conversation digest in assembled context.
+const sessionSummaryHeading = "## Conversation so far"
 
 // renderBundleItem is the exact text one bundled memory contributes to the prompt.
 func renderBundleItem(text string, truncated bool) string {
@@ -219,6 +271,7 @@ func memoryTextForBundle(hit MemoryHit, budget RecallBudget) string {
 
 func (s *MemoryService) formatBundle(ctx context.Context, bundle *ContextBundle, budget RecallBudget) string {
 	if budget.Formalizer != nil {
+		// A custom renderer owns the output entirely, including any session digest it wants to use.
 		hits := make([]MemoryHit, 0, len(bundle.Items))
 		for _, item := range bundle.Items {
 			hits = append(hits, MemoryHit{MemoryItem: model.MemoryItem{
@@ -229,6 +282,12 @@ func (s *MemoryService) formatBundle(ctx context.Context, bundle *ContextBundle,
 	}
 
 	var builder strings.Builder
+	if bundle.SessionSummary != nil && strings.TrimSpace(bundle.SessionSummary.Summary) != "" {
+		builder.WriteString(sessionSummaryHeading)
+		builder.WriteString("\n")
+		builder.WriteString(strings.TrimSpace(bundle.SessionSummary.Summary))
+		builder.WriteString("\n\n")
+	}
 	if len(bundle.Items) > 0 {
 		builder.WriteString(bundleHeader)
 		for _, item := range bundle.Items {

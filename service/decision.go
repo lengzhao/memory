@@ -114,29 +114,14 @@ func (de *DecisionEngine) FindSimilarMemories(ctx context.Context, scope Scope, 
 		return nil, nil
 	}
 
-	// Reuse the same relevance scale as Recall, so "similarity 0.8" means the same thing in both
-	// places and the decision prompt's thresholds stay meaningful.
-	var results []struct {
-		ItemID string
-		BM25   float64
+	// Same relevance notion as Recall (token coverage), so "similarity 0.8" means the same thing in
+	// both places and the decision prompt's thresholds stay meaningful. Candidates are pre-filtered
+	// by the index so the LIKE scan never runs here.
+	itemIDs, coverage, source, err := NewMemoryService(de.db).search(ctx, query, topK*2)
+	if err != nil {
+		return nil, err
 	}
-	if err := de.db.WithContext(ctx).Raw(`
-		SELECT item_id, bm25(fts_memory) AS bm25
-		FROM fts_memory
-		WHERE tokenized_content MATCH ?
-		ORDER BY bm25
-		LIMIT ?
-	`, ftsQuery(tokens), topK*2).Scan(&results).Error; err != nil {
-		return nil, wrapErr(CodeInternal, "similarity search failed", err)
-	}
-
-	itemIDs := make([]string, 0, len(results))
-	bm25Scores := make(map[string]float64, len(results))
-	for _, r := range results {
-		itemIDs = append(itemIDs, r.ItemID)
-		bm25Scores[r.ItemID] = r.BM25
-	}
-	if len(itemIDs) == 0 {
+	if source != textScoreFTS || len(itemIDs) == 0 {
 		return nil, nil
 	}
 
@@ -155,7 +140,7 @@ func (de *DecisionEngine) FindSimilarMemories(ctx context.Context, scope Scope, 
 
 	similar := make([]SimilarMemory, 0, len(items))
 	for _, item := range items {
-		ftsSim := bm25ToSimilarity(bm25Scores[item.ID])
+		ftsSim := coverage[item.ID]
 		tagSim := calculateTagOverlap(candidate.Tags, parseTags(item.TagsJSON))
 		finalSim := weights.FTSSimilarity*ftsSim + weights.TagOverlap*tagSim
 		if finalSim <= similarityThreshold {
@@ -187,7 +172,8 @@ func (de *DecisionEngine) FindSimilarMemories(ctx context.Context, scope Scope, 
 	return similar, nil
 }
 
-// similarityThreshold keeps obviously unrelated rows out of the decision prompt.
+// similarityThreshold keeps rows with almost no topical overlap out of the decision prompt. It
+// applies to the coverage-based similarity (see tokenCoverage), so it is corpus-size independent.
 const similarityThreshold = 0.2
 
 type decisionSimilarityWeights struct {

@@ -30,8 +30,13 @@ P0（正确性 / 隔离 / 删除合规）已在 `dev` 分支完成，实现约�
 - [x] **检索正确性**：修掉 `bm25()` 符号误判（SQLite 返回负值，原实现把"≤0"当满分，
       导致相关性排序完全失效）；索引不再头尾折叠；自然语言查询直接可用；
       子串扫描作为显式降级并标注来源。
-- [ ] **会话滚动摘要**：`RecallContext` 现在做的是"每回合从库里重新装配"；跨回合的长会话还需要一个
-      持久化的滚动摘要（按 session 累积、随轮次更新），当前只有静态的命名空间概览。
+- [x] **会话滚动摘要**：`RollSessionSummary` 复用同一次提取请求产出并滚动（零额外调用）；
+      `SetSessionSummary` 给前端；`EnsureSessionSummary` 走本地确定性聚合兜底；
+      `RecallContext(IncludeSessionSummary)` 装配在记忆块之前。
+- [x] **LLM 离线测试替身**：`service/llm_fake_test.go` 的 `fakeLLM`（`httptest`）覆盖提取、
+      失败记录、DryRun、摘要滚动、决策引擎，全链路可离线回归。
+- [x] **相关性打分修正**：FTS5 `bm25()` 的 IDF 在小库上退化（单文档完美匹配得 0 分），
+      排序改用与语料规模无关的**词覆盖率**，同时保留 FTS 作为候选筛选。
 - [ ] **语义召回（暂缓，前端承担改写）**：按当前约定，前端把用户表达转成正常语义后再查询，
       库内只做词法检索；`EmbeddingRef` 仍是预留字段。若将来要上向量检索，入口应是与 BM25 分数的
       混合排序，注意两种分数尺度不同，需要先归一化而不是直接相加。
@@ -39,8 +44,8 @@ P0（正确性 / 隔离 / 删除合规）已在 `dev` 分支完成，实现约�
       `memory_links` 表结构、无写入方。
 - [ ] **字段级合并且可解释**：MERGE 目前是 LLM 给文本或拼接 `[Additional Info]`。需要结构化合并策略
       （数值取最新、列表去重、时间取最近）与冲突原因留痕。
-- [ ] **LLM provider 抽象**：接口化（Anthropic/Gemini/本地）、重试/退避/限流、成本与 token 计量、
-      输出 schema 校验、`httptest` 测试替身（当前提取/决策链路无法离线测试）。
+- [ ] **LLM provider 抽象**：目前仍是 OpenAI 兼容协议 + 已有 `httptest` 替身；还缺接口化
+      （Anthropic/Gemini/本地）、重试/退避/限流、成本与 token 计量、输出 schema 校验。
 - [ ] **写入确认与反馈**：propose→确认队列，按用户反馈强化/遗忘（当前只有被动 `access_count`）。
 - [ ] **footprint 控制**：jiebago 内置大词典无 build tag 开关，边缘 Agent 需要可选裁剪。
 

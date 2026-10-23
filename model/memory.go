@@ -292,6 +292,46 @@ func (DialogExtraction) TableName() string {
 	return "dialog_extractions"
 }
 
+// SessionSummary is the rolling digest of one conversation: what has happened in this session so
+// far. It is what a host puts in front of the recent turns when a session grows past the context
+// window, and it is deliberately part of the isolation model (scope + session), not a global note.
+type SessionSummary struct {
+	// ID is derived from (scope_key, session_id) so a session has exactly one current digest.
+	ID string `gorm:"column:id;type:text;primaryKey"`
+	// ScopeKey is Scope.String() of the owning identity; tenant/user/agent are also stored
+	// explicitly so an administrative sweep can select by them.
+	ScopeKey  string `gorm:"column:scope_key;type:text;not null;index:idx_session_scope"`
+	TenantID  string `gorm:"column:tenant_id;type:text;not null"`
+	UserID    string `gorm:"column:user_id;type:text;not null"`
+	SessionID string `gorm:"column:session_id;type:text;not null;index:idx_session_id"`
+	AgentID   string `gorm:"column:agent_id;type:text;not null"`
+	Summary   string `gorm:"column:summary;type:text;not null"`
+	// TokenCount is the token cost of Summary, recorded so budgeting does not recount.
+	TokenCount int `gorm:"column:token_count;type:integer"`
+	// Revision increments on every update. Feed it to the model as "how many times this digest has
+	// been revised" and use it to detect a stale local copy.
+	Revision int64 `gorm:"column:revision;type:integer"`
+	// Source is where the digest came from: the extraction model, the host application, or the
+	// deterministic local rollup. Exposed so a host can tell what it is reading.
+	Source string `gorm:"column:source;type:text"`
+	// Extractions is how many dialog extractions had been folded in when the digest was written.
+	Extractions int       `gorm:"column:extractions;type:integer"`
+	CreatedAt   time.Time `gorm:"column:created_at;type:datetime;not null"`
+	UpdatedAt   time.Time `gorm:"column:updated_at;type:datetime;not null"`
+}
+
+// TableName specifies the table name for SessionSummary
+func (SessionSummary) TableName() string {
+	return "session_summaries"
+}
+
+// Session summary sources.
+const (
+	SessionSummarySourceLLM    = "llm"
+	SessionSummarySourceHost   = "host"
+	SessionSummarySourceRollup = "rollup"
+)
+
 // MemoryMerge tracks merge operations for memory consolidation
 type MemoryMerge struct {
 	ID             string    `gorm:"column:id;type:text;primaryKey"`

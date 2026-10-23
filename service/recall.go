@@ -209,7 +209,8 @@ func (s *MemoryService) scoreAndRank(ctx context.Context, items []model.MemoryIt
 			switch source {
 			case textScoreFTS:
 				hit.FTSScore = ftsScores[item.ID]
-				hit.MatchReasons = append(hit.MatchReasons, "fts_match")
+				hit.MatchReasons = append(hit.MatchReasons,
+					"fts_match", "coverage:"+itoa(int(hit.FTSScore*100))+"%")
 			default:
 				hit.FTSScore = substringMatchScore
 				hit.MatchReasons = append(hit.MatchReasons, "substring_match")
@@ -355,11 +356,14 @@ func (s *MemoryService) search(ctx context.Context, query string, limit int) ([]
 	}
 
 	var results []struct {
-		ItemID string
-		BM25   float64
+		ItemID        string
+		TokenizedText string
+		BM25          float64
 	}
 	err := s.db.WithContext(ctx).Raw(`
-		SELECT item_id, bm25(fts_memory) AS bm25
+		SELECT item_id,
+		       tokenized_content AS tokenized_text,
+		       bm25(fts_memory) AS bm25
 		FROM fts_memory
 		WHERE tokenized_content MATCH ?
 		ORDER BY bm25
@@ -378,9 +382,33 @@ func (s *MemoryService) search(ctx context.Context, query string, limit int) ([]
 	scores := make(map[string]float64, len(results))
 	for _, r := range results {
 		ids = append(ids, r.ItemID)
-		scores[r.ItemID] = bm25ToSimilarity(r.BM25)
+		scores[r.ItemID] = tokenCoverage(tokens, r.TokenizedText)
 	}
 	return ids, scores, textScoreFTS, nil
+}
+
+// tokenCoverage is the fraction of the query's tokens that the memory contains, i.e. how much of
+// what was asked for this memory actually covers.
+//
+// It is deliberately not BM25-derived. FTS5's bm25() is IDF-weighted, so in a small database (or a
+// single-document match) the IDF term degenerates and even a perfect match scores ~0 — exactly the
+// case an embedded per-user memory database is in. Coverage is IDF-free: it means the same thing at
+// any corpus size, and its ordering matches intuition for natural-language queries.
+func tokenCoverage(queryTokens []string, indexedText string) float64 {
+	if len(queryTokens) == 0 {
+		return 0
+	}
+	indexed := make(map[string]struct{}, 16)
+	for _, token := range strings.Fields(indexedText) {
+		indexed[token] = struct{}{}
+	}
+	matched := 0
+	for _, token := range queryTokens {
+		if _, ok := indexed[token]; ok {
+			matched++
+		}
+	}
+	return float64(matched) / float64(len(queryTokens))
 }
 
 // ftsQuery builds an OR query over quoted tokens. Quoting makes the tokens literals, so user input
@@ -396,27 +424,6 @@ func ftsQuery(tokens []string) string {
 	}
 	return strings.Join(quoted, " OR ")
 }
-
-// bm25ToSimilarity maps an FTS5 BM25 score onto [0,1), where higher means more relevant.
-//
-// SQLite's bm25() returns a NEGATIVE value and a more negative number means a better match (it is
-// the negation of the classic BM25 score). Treating "<= 0" as "perfect" therefore collapses every
-// row to the same similarity and destroys ranking entirely — which is exactly what the old
-// "if bm25 <= 0 return 1.0" did.
-//
-// The mapping is absolute rather than relative to the current result set, so a score means the same
-// thing across queries: relevance = raw / (raw + bm25Scale), with raw = -bm25.
-func bm25ToSimilarity(bm25 float64) float64 {
-	raw := -bm25
-	if raw <= 0 {
-		return 0
-	}
-	return normalizeScore(raw / (raw + bm25Scale))
-}
-
-// bm25Scale is the relevance at which a match scores 0.5. Observed FTS5 values for meaningful
-// matches sit around 1-3, so 1.0 separates a strong match from incidental token overlap.
-const bm25Scale = 1.0
 
 // escapeLikePattern escapes LIKE metacharacters so user input matches literally.
 func escapeLikePattern(s string) string {
