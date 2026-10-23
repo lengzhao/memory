@@ -8,23 +8,25 @@ import (
 	"github.com/lengzhao/jiebago"
 )
 
-const (
-	// maxTokenizeLen limits how much text is tokenized for the search index.
-	// Long texts are folded into head + tail, keeping both extremes searchable while
-	// bounding index size. Only the index is truncated — the stored content is untouched,
-	// and Recall falls back to a LIKE scan when the index yields nothing.
-	maxTokenizeHead = 120
-	maxTokenizeTail = 120
-)
+// maxIndexRunes caps how much of a memory is tokenized into the search index.
+//
+// The cap exists to bound index size, not to filter: memories are normally far below it, so in
+// practice the whole text is indexed and any keyword in it is findable. Only rows larger than the
+// cap lose their tail from the index (their stored content is untouched, and the row is still
+// reachable by ID).
+const maxIndexRunes = 4000
 
 // TokenizeForSearch tokenizes text for search indexing.
-// Uses jiebago's search engine mode for high recall; the result is a space-separated
-// token stream with duplicates removed.
+//
+// It uses jiebago's search-engine mode, which emits both the longest and the shorter embedded words
+// for each CJK span. Indexing those overlapping tokens is what lets a natural-language query match
+// without any extra similarity logic: a query segmented into "并发 写 超时" matches a memory indexed
+// as "并发 写 串行 busy_timeout". The result is a space-separated token stream with duplicates removed.
 func TokenizeForSearch(text string) string {
 	if text == "" {
 		return ""
 	}
-	return tokenize(truncateForTokenize(text))
+	return tokenize(truncateForIndex(text))
 }
 
 // TokenizeQuery tokenizes a user search query. Queries are short, so no truncation applies.
@@ -58,19 +60,13 @@ func tokenize(text string) string {
 	return strings.Join(words, " ")
 }
 
-// truncateForTokenize limits text length for indexing.
-// For long text it keeps the first and last maxTokenize* runes, which is where titles,
-// summaries and conclusions usually live.
-func truncateForTokenize(text string) string {
+// truncateForIndex bounds the text handed to the tokenizer.
+func truncateForIndex(text string) string {
 	runes := []rune(text)
-	if len(runes) <= maxTokenizeHead+maxTokenizeTail {
+	if len(runes) <= maxIndexRunes {
 		return text
 	}
-
-	head := string(runes[:maxTokenizeHead])
-	tail := string(runes[len(runes)-maxTokenizeTail:])
-
-	return head + " " + tail
+	return string(runes[:maxIndexRunes])
 }
 
 // isAllPunctOrSpace checks if string is all punctuation or whitespace.

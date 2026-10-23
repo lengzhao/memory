@@ -139,12 +139,16 @@ func TestChineseSearch_TopKRanking(t *testing.T) {
 		t.Errorf("Expected at most 5 hits with TopK=5, got %d", len(hits))
 	}
 
-	// Verify results are ranked by importance (higher first)
+	// Verify results are ranked by relevance: the combined score is non-increasing, and every hit
+	// carries a non-zero text component because they all matched the query.
 	if len(hits) >= 2 {
 		for i := 0; i < len(hits)-1; i++ {
-			if hits[i].Importance < hits[i+1].Importance {
-				t.Errorf("Results not properly ranked: hit[%d].Importance=%d < hit[%d].Importance=%d",
-					i, hits[i].Importance, i+1, hits[i+1].Importance)
+			if hits[i].Score < hits[i+1].Score {
+				t.Errorf("Results not properly ranked: hit[%d].Score=%.4f < hit[%d].Score=%.4f",
+					i, hits[i].Score, i+1, hits[i+1].Score)
+			}
+			if hits[i].FTSScore <= 0 {
+				t.Errorf("hit[%d] matched the query but carries no text relevance", i)
 			}
 		}
 	}
@@ -352,12 +356,12 @@ func TestChineseSearch_MultiWordMatch(t *testing.T) {
 		t.Errorf("Expected 2 hits for '北京', got %d: %v", len(hits), getHitTitles(hits))
 	}
 
-	// Verify ranking (higher importance first)
-	if len(hits) == 2 && hits[0].Importance < hits[1].Importance {
-		t.Error("Results not ranked by importance (higher first)")
+	// Verify ranking: scores are non-increasing across the result set.
+	if len(hits) == 2 && hits[0].Score < hits[1].Score {
+		t.Errorf("Results not ranked by score: %.4f < %.4f", hits[0].Score, hits[1].Score)
 	}
 
-	t.Logf("Search '北京' found %d hits, ranked by importance", len(hits))
+	t.Logf("Search '北京' found %d hits, top score %.4f", len(hits), hits[0].Score)
 
 	// Search "上海" should return 2 items (北京上海、上海深圳)
 	hits, err = svc.Recall(ctx, testScope(), memory.RecallRequest{
@@ -530,10 +534,10 @@ func TestChineseSearch_SentenceQuery(t *testing.T) {
 		}
 	}
 
-	// Verify ranking is by importance (descending)
+	// Verify ranking is by combined relevance (descending).
 	if len(hits) == 2 {
-		if hits[0].Importance < hits[1].Importance {
-			t.Error("Results not properly ranked by importance (higher should be first)")
+		if hits[0].Score < hits[1].Score {
+			t.Errorf("Results not properly ranked by score: %.4f < %.4f", hits[0].Score, hits[1].Score)
 		}
 	}
 }

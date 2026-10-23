@@ -356,7 +356,8 @@ func TestRecall_LongContentStaysSearchable(t *testing.T) {
 	ctx := context.Background()
 	scope := testScope()
 
-	long := strings.Repeat("头部填充内容 ", 60) + "MIDDLETOKEN" + strings.Repeat(" 尾部填充内容", 60)
+	// A realistically long memory: every keyword in it must be findable, not just the head and tail.
+	long := strings.Repeat("背景说明文字 ", 200) + "MIDDLETOKEN" + strings.Repeat(" 补充说明文字", 300)
 	if _, err := svc.Remember(ctx, scope, RememberRequest{NamespaceType: model.NamespaceTypeKnowledge, Content: long, Confidence: 0.9}); err != nil {
 		t.Fatalf("remember failed: %v", err)
 	}
@@ -366,7 +367,96 @@ func TestRecall_LongContentStaysSearchable(t *testing.T) {
 		t.Fatalf("recall failed: %v", err)
 	}
 	if len(hits) != 1 {
-		t.Fatalf("expected the long memory to be found through the substring fallback, got %d", len(hits))
+		t.Fatalf("expected the whole long memory to be indexed, got %d hits", len(hits))
+	}
+}
+
+func TestRecall_NaturalLanguageQuery(t *testing.T) {
+	svc, _ := newSvc(t)
+	ctx := context.Background()
+	scope := testScope()
+
+	// The frontend is expected to send a normal question rather than extracted keywords: the query
+	// is tokenized the same way as the indexed text, so its content words match.
+	svc.Remember(ctx, scope, RememberRequest{
+		NamespaceType: model.NamespaceTypeKnowledge,
+		Content:       "SQLite 使用 WAL 模式以便并发读，写操作串行，需要设置 busy_timeout 参数",
+		Confidence:    0.9,
+	})
+
+	for _, query := range []string{
+		"SQLite 并发读",
+		"数据库 并发 写 超时 参数",
+		"并发写为什么失败",
+		"busy_timeout",
+	} {
+		hits, err := svc.Recall(ctx, scope, RecallRequest{Query: query, TopK: 5})
+		if err != nil {
+			t.Fatalf("recall %q failed: %v", query, err)
+		}
+		if len(hits) != 1 {
+			t.Errorf("query %q: expected the memory to be found, got %d hits", query, len(hits))
+			continue
+		}
+		if len(hits[0].MatchReasons) == 0 || hits[0].MatchReasons[0] != "fts_match" {
+			t.Errorf("query %q: expected an index match, got %v", query, hits[0].MatchReasons)
+		}
+	}
+
+	// A query with no shared content word finds nothing (no semantic rewriting inside the library).
+	hits, err := svc.Recall(ctx, scope, RecallRequest{Query: "上次说的那个超时问题是什么", TopK: 5})
+	if err != nil {
+		t.Fatalf("recall failed: %v", err)
+	}
+	if len(hits) != 0 {
+		t.Fatalf("expected no match without a shared content word, got %d", len(hits))
+	}
+}
+
+func TestRecall_SubstringFallbackIsExplicit(t *testing.T) {
+	svc, _ := newSvc(t)
+	ctx := context.Background()
+	scope := testScope()
+
+	// Punctuation has no index terms: the literal scan answers it, and the reason is reported.
+	svc.Remember(ctx, scope, RememberRequest{NamespaceType: model.NamespaceTypeKnowledge, Content: "数据校验使用 ★ 作为分隔符", Confidence: 0.9})
+
+	hits, err := svc.Recall(ctx, scope, RecallRequest{Query: "★", TopK: 5})
+	if err != nil {
+		t.Fatalf("recall failed: %v", err)
+	}
+	if len(hits) != 1 {
+		t.Fatalf("expected the literal scan to find the memory, got %d", len(hits))
+	}
+	if len(hits[0].MatchReasons) == 0 || hits[0].MatchReasons[0] != "substring_match" {
+		t.Fatalf("expected the substring reason to be reported, got %v", hits[0].MatchReasons)
+	}
+	if hits[0].FTSScore != substringMatchScore {
+		t.Fatalf("expected the documented substring score %v, got %v", substringMatchScore, hits[0].FTSScore)
+	}
+}
+
+func TestRecall_BM25RanksCloserMatchFirst(t *testing.T) {
+	svc, _ := newSvc(t)
+	ctx := context.Background()
+	scope := testScope()
+
+	svc.Remember(ctx, scope, RememberRequest{NamespaceType: model.NamespaceTypeKnowledge, Content: "SQLite WAL 并发 读 写 串行 busy_timeout", Confidence: 0.9})
+	svc.Remember(ctx, scope, RememberRequest{NamespaceType: model.NamespaceTypeKnowledge, Content: "PostgreSQL 连接池 与 并发 控制", Confidence: 0.9})
+	svc.Remember(ctx, scope, RememberRequest{NamespaceType: model.NamespaceTypeKnowledge, Content: "冬天 适合 喝 热酒", Confidence: 0.9})
+
+	hits, err := svc.Recall(ctx, scope, RecallRequest{Query: "SQLite WAL 并发 读 写", TopK: 5})
+	if err != nil {
+		t.Fatalf("recall failed: %v", err)
+	}
+	if len(hits) != 2 {
+		t.Fatalf("expected the two SQL/concurrency memories, got %d", len(hits))
+	}
+	if !strings.Contains(hits[0].Content, "SQLite") {
+		t.Fatalf("expected the closer match first, got %q", hits[0].Content)
+	}
+	if hits[0].FTSScore <= hits[1].FTSScore {
+		t.Fatalf("expected BM25 to separate the matches: %v vs %v", hits[0].FTSScore, hits[1].FTSScore)
 	}
 }
 
@@ -1721,5 +1811,31 @@ func TestRemember_DefaultConfidenceIsRecallable(t *testing.T) {
 	}
 	if len(hits) != 1 {
 		t.Fatalf("expected the unscored memory to be recallable at the default floor, got %d", len(hits))
+	}
+}
+
+// ---- BM25 mapping ---------------------------------------------------------------------------
+
+func TestBM25ToSimilarity_MapsNegatedScores(t *testing.T) {
+	// SQLite returns negative values where more negative is better. The mapping must be monotone:
+	// a better (more negative) score yields a higher similarity.
+	strong := bm25ToSimilarity(-2.0)
+	weak := bm25ToSimilarity(-0.5)
+	none := bm25ToSimilarity(0)
+
+	if !(strong > weak && weak > none) {
+		t.Fatalf("expected monotone similarity, got strong=%v weak=%v none=%v", strong, weak, none)
+	}
+	if strong >= 1 || weak <= 0 {
+		t.Fatalf("expected an open (0,1) range, got strong=%v weak=%v", strong, weak)
+	}
+	// A row that merely shares one token must not score as high as a strong textual match: this is
+	// the discrimination that a "<= 0 => 1.0" rule destroyed.
+	if strong-weak < 0.2 {
+		t.Fatalf("expected clear separation between strong and weak matches, got %v vs %v", strong, weak)
+	}
+	// The scale is absolute, not relative to the result set, so repeated calls agree.
+	if bm25ToSimilarity(-2.0) != strong {
+		t.Fatal("expected a deterministic, query-independent mapping")
 	}
 }

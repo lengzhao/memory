@@ -79,9 +79,10 @@ func (s *MemoryService) Recall(ctx context.Context, scope Scope, req RecallReque
 	})
 
 	var (
-		matchedIDs []string
-		ftsScores  map[string]float64
-		useLike    bool
+		matchedIDs    []string
+		ftsScores     map[string]float64
+		scoreSource   textScoreSource
+		substringScan bool
 	)
 	if req.Query != "" {
 		candidateLimit := req.TopK * 3
@@ -89,21 +90,19 @@ func (s *MemoryService) Recall(ctx context.Context, scope Scope, req RecallReque
 			candidateLimit = 50
 		}
 		var err error
-		matchedIDs, ftsScores, useLike, err = s.search(ctx, req.Query, candidateLimit)
+		matchedIDs, ftsScores, scoreSource, err = s.search(ctx, req.Query, candidateLimit)
 		if err != nil {
 			return nil, err
 		}
-		if useLike {
-			// The tokenized index could not serve this query (typically a CJK query whose
-			// tokens do not survive segmentation). Fall back to a substring scan with escaped
-			// wildcards so the query cannot smuggle LIKE metacharacters.
+		if scoreSource == textScoreSubstring {
+			// The tokenized index could not serve this query at all. Scan for the literal text with
+			// escaped wildcards, so the query cannot smuggle LIKE metacharacters.
+			substringScan = true
 			pattern := "%" + escapeLikePattern(req.Query) + "%"
 			query = query.Where(
 				"(title LIKE ? ESCAPE '\\' OR content LIKE ? ESCAPE '\\' OR summary LIKE ? ESCAPE '\\')",
 				pattern, pattern, pattern,
 			)
-		} else if len(matchedIDs) == 0 {
-			return []MemoryHit{}, nil
 		} else {
 			query = query.Where("id IN ?", matchedIDs)
 		}
@@ -114,7 +113,7 @@ func (s *MemoryService) Recall(ctx context.Context, scope Scope, req RecallReque
 		return nil, wrapErr(CodeInternal, "recall query failed", err)
 	}
 
-	hits, err := s.scoreAndRank(ctx, items, req.Query, ftsScores)
+	hits, err := s.scoreAndRank(ctx, items, req.Query, scoreSource, ftsScores)
 	if err != nil {
 		return nil, err
 	}
@@ -122,7 +121,7 @@ func (s *MemoryService) Recall(ctx context.Context, scope Scope, req RecallReque
 		hits = hits[:req.TopK]
 	}
 
-	if len(matchedIDs) == 0 {
+	if len(matchedIDs) == 0 || substringScan {
 		matchedIDs = make([]string, 0, len(hits))
 		for _, hit := range hits {
 			matchedIDs = append(matchedIDs, hit.ID)
@@ -195,7 +194,7 @@ func (s *MemoryService) List(ctx context.Context, scope Scope, req ListRequest) 
 }
 
 // scoreAndRank applies the policy weights over the candidate rows.
-func (s *MemoryService) scoreAndRank(ctx context.Context, items []model.MemoryItem, query string, ftsScores map[string]float64) ([]MemoryHit, error) {
+func (s *MemoryService) scoreAndRank(ctx context.Context, items []model.MemoryItem, query string, source textScoreSource, ftsScores map[string]float64) ([]MemoryHit, error) {
 	now := time.Now()
 	hits := make([]MemoryHit, 0, len(items))
 	weightCache := make(map[string]rankWeights)
@@ -203,13 +202,16 @@ func (s *MemoryService) scoreAndRank(ctx context.Context, items []model.MemoryIt
 	for _, item := range items {
 		hit := MemoryHit{MemoryItem: item}
 
-		// Text relevance: BM25-derived for index hits, neutral for substring/unfiltered matches.
+		// Text relevance. BM25 and a substring hit live on different scales, so the substring case
+		// gets a fixed, documented value rather than being averaged with BM25 numbers. The reason is
+		// readable by callers through MatchReasons.
 		if query != "" {
-			if score, ok := ftsScores[item.ID]; ok {
-				hit.FTSScore = score
+			switch source {
+			case textScoreFTS:
+				hit.FTSScore = ftsScores[item.ID]
 				hit.MatchReasons = append(hit.MatchReasons, "fts_match")
-			} else {
-				hit.FTSScore = 0.5
+			default:
+				hit.FTSScore = substringMatchScore
 				hit.MatchReasons = append(hit.MatchReasons, "substring_match")
 			}
 		}
@@ -247,6 +249,11 @@ func (s *MemoryService) scoreAndRank(ctx context.Context, items []model.MemoryIt
 // recencyHalfLifeHours is the half-life of the recency term: a week-old memory keeps half the
 // weight of a fresh one.
 const recencyHalfLifeHours = 168
+
+// substringMatchScore is the text component for a literal substring hit. A substring scan cannot
+// rank, so this is a fixed mid-scale value: it keeps such memories in the result set without
+// pretending to know how relevant they are.
+const substringMatchScore = 0.5
 
 type rankWeights struct {
 	FTS        float64
@@ -309,47 +316,71 @@ func resolveMinConfidence(requested float64, skip bool) float64 {
 	return requested
 }
 
-// search runs the text search, returning matched IDs (best first), their BM25-derived similarity
-// and whether the caller should fall back to a substring scan.
-func (s *MemoryService) search(ctx context.Context, query string, limit int) ([]string, map[string]float64, bool, error) {
+// textScoreSource records how the text component of a score was obtained. Ranking depends on it:
+// a BM25 relevance and a substring hit are not comparable, so the caller must know which one it
+// received. The scale steps down; nothing is averaged across them.
+type textScoreSource int
+
+const (
+	// textScoreNone means the request had no query text.
+	textScoreNone textScoreSource = iota
+	// textScoreFTS is a BM25 relevance from the search index.
+	textScoreFTS
+	// textScoreSubstring is a literal substring hit over the raw columns.
+	textScoreSubstring
+)
+
+func (s textScoreSource) String() string {
+	switch s {
+	case textScoreFTS:
+		return "fts"
+	case textScoreSubstring:
+		return "substring"
+	default:
+		return "none"
+	}
+}
+
+// search runs the text search and reports how the result was produced.
+//
+// It prefers the tokenized index and degrades to a substring scan only when the index cannot serve
+// the query at all. The degradation is a policy decision (a substring scan cannot rank), not a
+// silent fallback that mixes incomparable scores.
+func (s *MemoryService) search(ctx context.Context, query string, limit int) ([]string, map[string]float64, textScoreSource, error) {
 	tokens := strings.Fields(TokenizeQuery(query))
 	if len(tokens) == 0 {
-		return nil, nil, true, nil
+		// A query made only of punctuation has no index terms: the substring scan is the only way
+		// to answer it literally.
+		return nil, nil, textScoreSubstring, nil
 	}
 
 	var results []struct {
-		ItemID        string
-		TokenizedText string
-		BM25          float64
+		ItemID string
+		BM25   float64
 	}
 	err := s.db.WithContext(ctx).Raw(`
-		SELECT item_id,
-		       tokenized_content AS tokenized_text,
-		       bm25(fts_memory) AS bm25
+		SELECT item_id, bm25(fts_memory) AS bm25
 		FROM fts_memory
 		WHERE tokenized_content MATCH ?
 		ORDER BY bm25
 		LIMIT ?
 	`, ftsQuery(tokens), limit).Scan(&results).Error
 	if err != nil {
-		// A malformed query must not fail the recall; the caller falls back to LIKE.
+		// A malformed query must not fail the recall.
 		GetLogger().Warn("fts search failed, falling back to substring scan", "error", err)
-		return nil, nil, true, nil
+		return nil, nil, textScoreSubstring, nil
+	}
+	if len(results) == 0 {
+		return nil, nil, textScoreSubstring, nil
 	}
 
 	ids := make([]string, 0, len(results))
 	scores := make(map[string]float64, len(results))
 	for _, r := range results {
-		if !containsWholeToken(r.TokenizedText, tokens) {
-			continue
-		}
 		ids = append(ids, r.ItemID)
 		scores[r.ItemID] = bm25ToSimilarity(r.BM25)
 	}
-	if len(ids) == 0 {
-		return nil, nil, true, nil
-	}
-	return ids, scores, false, nil
+	return ids, scores, textScoreFTS, nil
 }
 
 // ftsQuery builds an OR query over quoted tokens. Quoting makes the tokens literals, so user input
@@ -366,29 +397,26 @@ func ftsQuery(tokens []string) string {
 	return strings.Join(quoted, " OR ")
 }
 
-// containsWholeToken reports whether the indexed token stream contains at least one query token as
-// a complete token. Segmentation emits overlapping tokens ("数据" inside "数据库"), so plain OR
-// matching alone is far too loose for short queries.
-func containsWholeToken(tokenizedText string, tokens []string) bool {
-	indexed := make(map[string]struct{})
-	for _, t := range strings.Fields(tokenizedText) {
-		indexed[t] = struct{}{}
+// bm25ToSimilarity maps an FTS5 BM25 score onto [0,1), where higher means more relevant.
+//
+// SQLite's bm25() returns a NEGATIVE value and a more negative number means a better match (it is
+// the negation of the classic BM25 score). Treating "<= 0" as "perfect" therefore collapses every
+// row to the same similarity and destroys ranking entirely — which is exactly what the old
+// "if bm25 <= 0 return 1.0" did.
+//
+// The mapping is absolute rather than relative to the current result set, so a score means the same
+// thing across queries: relevance = raw / (raw + bm25Scale), with raw = -bm25.
+func bm25ToSimilarity(bm25 float64) float64 {
+	raw := -bm25
+	if raw <= 0 {
+		return 0
 	}
-	for _, t := range tokens {
-		if _, ok := indexed[t]; ok {
-			return true
-		}
-	}
-	return false
+	return normalizeScore(raw / (raw + bm25Scale))
 }
 
-// bm25ToSimilarity maps an FTS5 BM25 score (lower is better) onto (0,1].
-func bm25ToSimilarity(bm25 float64) float64 {
-	if bm25 <= 0 {
-		return 1.0
-	}
-	return normalizeScore(math.Exp(-bm25 / 3.0))
-}
+// bm25Scale is the relevance at which a match scores 0.5. Observed FTS5 values for meaningful
+// matches sit around 1-3, so 1.0 separates a strong match from incidental token overlap.
+const bm25Scale = 1.0
 
 // escapeLikePattern escapes LIKE metacharacters so user input matches literally.
 func escapeLikePattern(s string) string {

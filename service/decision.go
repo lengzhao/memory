@@ -117,14 +117,11 @@ func (de *DecisionEngine) FindSimilarMemories(ctx context.Context, scope Scope, 
 	// Reuse the same relevance scale as Recall, so "similarity 0.8" means the same thing in both
 	// places and the decision prompt's thresholds stay meaningful.
 	var results []struct {
-		ItemID        string
-		TokenizedText string
-		BM25          float64
+		ItemID string
+		BM25   float64
 	}
 	if err := de.db.WithContext(ctx).Raw(`
-		SELECT item_id,
-		       tokenized_content AS tokenized_text,
-		       bm25(fts_memory) AS bm25
+		SELECT item_id, bm25(fts_memory) AS bm25
 		FROM fts_memory
 		WHERE tokenized_content MATCH ?
 		ORDER BY bm25
@@ -136,9 +133,6 @@ func (de *DecisionEngine) FindSimilarMemories(ctx context.Context, scope Scope, 
 	itemIDs := make([]string, 0, len(results))
 	bm25Scores := make(map[string]float64, len(results))
 	for _, r := range results {
-		if !containsWholeToken(r.TokenizedText, tokens) {
-			continue
-		}
 		itemIDs = append(itemIDs, r.ItemID)
 		bm25Scores[r.ItemID] = r.BM25
 	}
