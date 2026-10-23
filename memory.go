@@ -120,6 +120,11 @@ type (
 	MemoryHit       = service.MemoryHit
 	ForgetRequest   = service.ForgetRequest
 	UpdateRequest   = service.UpdateRequest
+	RecallBudget    = service.RecallBudget
+	ContextBundle   = service.ContextBundle
+	BundleItem      = service.BundleItem
+	NamespaceDigest = service.NamespaceDigest
+	TokenCounter    = service.TokenCounter
 	PolicyManager   = service.PolicyManager
 	DecisionEngine  = service.DecisionEngine
 	DecisionType    = service.DecisionType
@@ -172,7 +177,8 @@ var (
 	NewPolicyManager  = service.NewPolicyManager
 	NewExtractor      = service.NewExtractor
 	NewDecisionEngine = service.NewDecisionEngine
-	// NewSummaryGenerator creates the namespace/item summary generator.
+	// NewSummaryGenerator derives per-item summaries (no LLM call). Namespace digests are produced
+	// by MemoryService.RefreshNamespaceSummary / GenerateNamespaceSummary.
 	NewSummaryGenerator = service.NewSummaryGenerator
 	// NewJanitor runs the background maintenance loop (expiry + retention).
 	NewJanitor = service.NewJanitor
@@ -219,11 +225,18 @@ const (
 	// DefaultMinConfidence is applied when a recall/list request leaves MinConfidence unset
 	// (set SkipConfidenceFilter for "no filter").
 	DefaultMinConfidence = service.DefaultMinConfidence
+	// DefaultConfidence is stored when a request states no confidence.
+	DefaultConfidence = service.DefaultConfidence
 	// MaxContentRunes bounds the size of one memory row.
 	MaxContentRunes = service.MaxContentRunes
 	// DefaultDeletedRetention is how long a hard-deleted row stays recoverable.
 	DefaultDeletedRetention = service.DefaultDeletedRetention
 )
+
+// DefaultNamespacePolicy returns the baseline policy of a namespace type (with a wildcard namespace
+// rule), so callers can override individual fields instead of restating all of them. Inside a scope,
+// Scope.Policy returns the same baseline bound to that scope's namespace.
+var DefaultNamespacePolicy = service.DefaultNamespacePolicy
 
 // 下列符号在 service 包定义，根包再导出便于单 import。
 

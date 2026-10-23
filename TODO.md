@@ -17,11 +17,18 @@ P0（正确性 / 隔离 / 删除合规）已在 `dev` 分支完成，实现约�
 - **可运维**：`Stats`/`Health`/`Janitor`、连接池与 `SQLITE_BUSY` 退避、`memory_events` 审计、
   库日志默认 WARN、LLM 超时兜底。
 
-## P1 — 记忆质量（下一步）
+## P1 — 记忆质量
 
-- [ ] **Token 预算装配**：`Recall` 现在只按条数裁剪。需要 `RecallBudget{MaxTokens, ReserveForPrompt}`、
-      会话滚动摘要、`NamespaceSummary` 的真正维护（`SummaryEnabled` / `SummaryItemTokenThreshold` /
-      `DefaultTopK` 目前仍无引擎消费，`SummaryGenerator` 是截断占位实现）。
+- [x] **Token 预算装配**：`RecallContext(ctx, scope, req, RecallBudget)` 按渲染后文本计量并裁剪
+      （`MaxTokens`/`MaxItems`/`PerItemMaxTokens`/`Formalizer`），裁剪可解释
+      （`Items[].Truncated`、`Bundle.Truncated`）；`SetTokenCounter` 可换精确分词器。
+- [x] **命名空间摘要**：`RefreshNamespaceSummary` / `GenerateNamespaceSummary` 生成并缓存概览
+      （内容指纹 + 时效），`SummaryEnabled` / `SummaryItemTokenThreshold` 真正生效；
+      `SummaryGenerator.GenerateItemSummary` 按句边界派生条目摘要。
+- [x] **策略零值落库**：`NamespacePolicy` 去掉 DB 默认值，`Scope.Policy(nsType)` 提供绑定基线，
+      `false`/`0` 不再被 GORM 静默跳过。
+- [ ] **会话滚动摘要**：`RecallContext` 现在做的是"每回合从库里重新装配"；跨回合的长会话还需要一个
+      持久化的滚动摘要（按 session 累积、随轮次更新），当前只有静态的命名空间概览。
 - [ ] **语义召回**：`EmbeddingRef` 是死字段。需要 embedding 接口 + 向量索引（sqlite-vec 或外部索引）+
       与 BM25 的混合排序 + 可选 rerank，用于同义改写与口语化查询。
 - [ ] **时序有效性**：`valid_from/valid_to`、as-of 查询、`supersedes` 链。矛盾检测目前只有

@@ -3,7 +3,8 @@ package service
 
 import (
 	"context"
-	"fmt"
+	"errors"
+	"strings"
 	"time"
 
 	"gorm.io/gorm"
@@ -11,7 +12,10 @@ import (
 	"github.com/lengzhao/memory/model"
 )
 
-// SummaryGenerator handles summary generation for items and namespaces.
+// SummaryGenerator produces the per-item summary stored alongside a memory. The stored summary is
+// what RecallContext uses when IncludeSummaryText is set, and it is derived locally: it never calls
+// an LLM. A host that wants model-written summaries passes them as RememberRequest.Summary (or via
+// UpdateRequest) instead of calling this.
 type SummaryGenerator struct {
 	db *gorm.DB
 }
@@ -21,96 +25,117 @@ func NewSummaryGenerator(db *gorm.DB) *SummaryGenerator {
 	return &SummaryGenerator{db: db}
 }
 
-// GenerateItemSummary generates a summary for a single memory item.
-// In production, this would call an LLM to summarize. For now, it truncates content.
-func (g *SummaryGenerator) GenerateItemSummary(ctx context.Context, itemID string) error {
+// GenerateItemSummary derives and stores a summary for one memory.
+//
+// It prefers the leading sentences of the content (where a writer usually states the point) over a
+// hard cut, and it keeps the summary under maxTokens when a positive budget is given.
+func (g *SummaryGenerator) GenerateItemSummary(ctx context.Context, scope Scope, itemID string, maxTokens int) error {
+	if err := scope.Validate(); err != nil {
+		return err
+	}
+	if maxTokens <= 0 {
+		maxTokens = defaultItemSummaryTokens
+	}
+
 	var item model.MemoryItem
-	if err := g.db.WithContext(ctx).First(&item, "id = ?", itemID).Error; err != nil {
-		if err == gorm.ErrRecordNotFound {
-			return wrapErr(CodeNotFound, "item not found", err)
+	if err := g.db.WithContext(ctx).Model(&model.MemoryItem{}).
+		Where("id = ?", itemID).
+		Where("namespace IN ?", scope.Namespaces()).
+		First(&item).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return wrapErr(CodeNotFound, "memory not found in this scope", err)
 		}
 		return wrapErr(CodeInternal, "query failed", err)
 	}
 
-	// Generate summary (simple truncation for now)
-	summary := generateSummary(item.Content, 100)
-
-	result := g.db.WithContext(ctx).Model(&item).Update("summary", summary)
-	if result.Error != nil {
-		return wrapErr(CodeInternal, "update summary failed", result.Error)
+	summary := summarizeText(item.Title, item.Content, maxTokens)
+	if summary == "" {
+		return wrapErr(CodeNotFound, "memory has no summarisable content", nil)
 	}
 
+	if err := g.db.WithContext(ctx).Model(&model.MemoryItem{}).
+		Where("id = ?", itemID).
+		Updates(map[string]interface{}{
+			"summary":    summary,
+			"updated_at": time.Now(),
+		}).Error; err != nil {
+		return wrapErr(CodeInternal, "update summary failed", err)
+	}
 	return nil
 }
 
-// GenerateNamespaceSummary generates a summary for a namespace.
-func (g *SummaryGenerator) GenerateNamespaceSummary(ctx context.Context, namespace string) (string, error) {
-	// Get items in namespace
-	var items []model.MemoryItem
-	if err := g.db.WithContext(ctx).
-		Where("namespace = ? AND status = ?", namespace, model.ItemStatusActive).
-		Order("created_at DESC").
-		Limit(50).
-		Find(&items).Error; err != nil {
-		return "", wrapErr(CodeInternal, "query items failed", err)
-	}
+// defaultItemSummaryTokens keeps a derived summary short enough to be cheap in a prompt.
+const defaultItemSummaryTokens = 60
 
-	if len(items) == 0 {
-		return "", wrapErr(CodeNotFound, "no items in namespace", nil)
-	}
+// summarizeText derives a summary: the title plus whole sentences from the head of the content,
+// trimmed to the token budget without splitting a sentence when one fits.
+func summarizeText(title, content string, maxTokens int) string {
+	title = strings.TrimSpace(title)
+	content = strings.TrimSpace(content)
 
-	// Generate summary (simple concatenation for now)
-	summary := fmt.Sprintf("Namespace %s contains %d items. Recent: ", namespace, len(items))
-	for i, item := range items {
-		if i >= 3 {
-			break
-		}
-		if i > 0 {
-			summary += ", "
-		}
-		summary += item.Title
+	body := firstSentences(content, maxTokens)
+	if title == "" {
+		return trimToTokens(body, maxTokens)
 	}
-
-	// Update or create namespace summary
-	now := time.Now()
-	var nsSummary model.NamespaceSummary
-	err := g.db.WithContext(ctx).Where("namespace = ?", namespace).First(&nsSummary).Error
-	if err != nil {
-		if err == gorm.ErrRecordNotFound {
-			// Create new
-			nsSummary = model.NamespaceSummary{
-				ID:        model.GenerateID(),
-				Namespace: namespace,
-				Summary:   summary,
-				ItemCount: len(items),
-				UpdatedAt: now,
-			}
-			if err := g.db.WithContext(ctx).Create(&nsSummary).Error; err != nil {
-				return "", wrapErr(CodeInternal, "create summary failed", err)
-			}
-			return summary, nil
-		}
-		return "", wrapErr(CodeInternal, "query summary failed", err)
+	if body == "" {
+		return trimToTokens(title, maxTokens)
 	}
-
-	// Update existing
-	nsSummary.Summary = summary
-	nsSummary.ItemCount = len(items)
-	nsSummary.UpdatedAt = now
-	if err := g.db.WithContext(ctx).Save(&nsSummary).Error; err != nil {
-		return "", wrapErr(CodeInternal, "update summary failed", err)
+	combined := title + ": " + body
+	if tokenCounter(combined) <= maxTokens {
+		return combined
 	}
-
-	return summary, nil
+	// Give the title a quarter of the budget and spend the rest on the body.
+	titleBudget := maxTokens / 4
+	if titleBudget < 8 {
+		titleBudget = 8
+	}
+	titlePart := trimToTokens(title, titleBudget)
+	remaining := maxTokens - tokenCounter(titlePart) - 2
+	if remaining <= 0 {
+		return titlePart
+	}
+	return titlePart + ": " + trimToTokens(body, remaining)
 }
 
-// generateSummary creates a simple summary by truncating text.
-// In production, this would use an LLM for intelligent summarization.
-// Handles multi-byte characters (Chinese, emoji, etc.) correctly.
-func generateSummary(content string, maxRunes int) string {
-	runes := []rune(content)
-	if len(runes) <= maxRunes {
-		return content
+// firstSentences returns the leading sentences of text that fit into maxTokens. Sentence boundaries
+// are recognised for both CJK (。！？；) and Latin (., !, ?) text.
+func firstSentences(text string, maxTokens int) string {
+	if tokenCounter(text) <= maxTokens {
+		return text
 	}
-	return string(runes[:maxRunes-3]) + "..."
+
+	var builder strings.Builder
+	for _, sentence := range splitSentences(text) {
+		candidate := strings.TrimSpace(builder.String() + sentence)
+		if tokenCounter(candidate) > maxTokens {
+			break
+		}
+		builder.WriteString(sentence)
+	}
+	result := strings.TrimSpace(builder.String())
+	if result == "" {
+		return trimToTokens(text, maxTokens)
+	}
+	return result
+}
+
+func splitSentences(text string) []string {
+	const terminators = "。！？；!?;\n"
+
+	sentences := make([]string, 0, 4)
+	var current strings.Builder
+	for _, r := range text {
+		current.WriteRune(r)
+		if strings.ContainsRune(terminators, r) {
+			sentences = append(sentences, current.String())
+			current.Reset()
+		}
+	}
+	if rest := strings.TrimSpace(current.String()); rest != "" {
+		sentences = append(sentences, rest)
+	}
+	if len(sentences) == 0 && strings.TrimSpace(text) != "" {
+		sentences = append(sentences, strings.TrimSpace(text))
+	}
+	return sentences
 }

@@ -84,3 +84,52 @@ svc.Recall(ctx, scope, memory.RecallRequest{...})
   推断类型（否则会拿到 transient 的 TTL 与权重）。`Config.ApplyPolicies` 开启后按策略推导过期时间。
 - **运维**：连接池收敛为单写者 + `busy_timeout`，写路径对 `SQLITE_BUSY` 指数退避重试；
   库内日志默认 WARN，不污染宿主输出；LLM 调用有默认超时兜底。
+
+## 6. 上下文装配：召回结果按预算裁剪
+
+`Recall` 只按 TopK 限条数，长记忆会把 prompt 预算吃光。新增 `RecallContext`：
+
+```go
+bundle, err := svc.RecallContext(ctx, scope, memory.RecallRequest{
+    NamespaceTypes: []memory.NamespaceType{memory.NamespaceTransient, memory.NamespaceAction},
+}, memory.RecallBudget{
+    MaxTokens:               800,
+    MaxItems:                10,
+    PerItemMaxTokens:        120,
+    IncludeSummaryText:      true,   // 有 summary 时用 summary 而不是全文
+    IncludeNamespaceSummary: true,   // 追加命名空间概览
+    NamespaceSummaryMaxTokens: 200,
+    Formalizer:              nil,    // 可选：自定义渲染
+})
+// bundle.Text / bundle.Tokens / bundle.Items / bundle.NamespaceSummaries / bundle.Truncated
+```
+
+设计取舍：
+
+- **预算按渲染后的文本计量**（含 bullet、分隔符、`[truncated]` 标记），不是按裸记忆文本：
+  "什么会被模型读到"才是要放得下的东西，`bundle.Tokens` 因此等于 `CountTokens(bundle.Text)`。
+- **裁剪可解释**：`Items[].Truncated` 标出被截断的条目，`Bundle.Truncated` 标出有丢件；
+  被截断的条目全文仍在库里，可按 ID 取回。
+- **`PerItemMaxTokens` 与 `MaxTokens` 是两级预算**：前者防止单条长记忆独占，后者是总量上限。
+- **计数可替换**：默认 `DefaultTokenCounter` 是无依赖估算（CJK 每字 1 token，拉丁约 4 字符 1 token，
+  向上取整）。宿主用 `memory.SetTokenCounter(tiktoken 包装)` 换成精确计数即可。
+- **摘要不是 LLM 调用**：命名空间概览是确定性的（条数 + 最重要条目的首句 + 标签热度），
+  在召回路径上不引入网络调用与延迟。
+
+## 7. 命名空间摘要与条目摘要
+
+`NamespaceSummary` 之前是个空壳（`SummaryEnabled`/`SummaryItemTokenThreshold` 无人消费，
+`SummaryGenerator` 只做截断）。现在：
+
+- `scope.Policy(nsType)` 给出绑定到该 scope 命名空间的基线策略，`SetPolicy` 全字段落库（含 `false`/`0`）；
+- `RefreshNamespaceSummary` 生成并**缓存**命名空间概览，缓存键是内容指纹
+  （活跃条数 + 各条 ID + 更新时间），内容变了或超过 10 分钟才重算（`Stale` 标明是否重算）；
+- `GenerateNamespaceSummary` 是显式重算版本；
+- 摘要只在 `SummaryEnabled` 为真时生成，且受 `SummaryItemTokenThreshold` 限制每条贡献的篇幅；
+- `SummaryGenerator.GenerateItemSummary(ctx, scope, id, maxTokens)` 按句边界派生条目摘要
+  （标题占 1/4 预算，其余给正文首句），不调用 LLM；
+- 越权访问返回 `UNAUTHORIZED`（命名空间不属于该 scope），不泄露存在性。
+
+**注意 GORM 零值陷阱**：`NamespacePolicy` 的列不再声明数据库默认值。GORM 会跳过"声明了默认值且为零值"
+的字段，导致 `SummaryEnabled=false` 被静默写成 `true`。现在字段默认值由
+`DefaultNamespacePolicy` / `Scope.Policy` 在 Go 侧提供，写入是全字段的，`false` 能真正落库。

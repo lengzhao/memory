@@ -133,16 +133,19 @@ func (MemoryLink) TableName() string {
 	return "memory_links"
 }
 
-// NamespaceSummary stores aggregated summaries for namespaces.
-// Used for quick overview of namespace contents without loading all items.
+// NamespaceSummary is the cached digest of one namespace: a compact overview used when assembling
+// context, so a host does not have to read every memory of a namespace on each turn.
 type NamespaceSummary struct {
-	ID          string     `gorm:"column:id;type:text;primaryKey"`
-	Namespace   string     `gorm:"column:namespace;type:text;uniqueIndex;not null"`
-	Summary     string     `gorm:"column:summary;type:text;not null"`
-	ItemCount   int        `gorm:"column:item_count;type:integer;not null"`
-	WindowStart *time.Time `gorm:"column:window_start;type:datetime"`
-	WindowEnd   *time.Time `gorm:"column:window_end;type:datetime"`
-	UpdatedAt   time.Time  `gorm:"column:updated_at;type:datetime;not null"`
+	ID        string `gorm:"column:id;type:text;primaryKey"`
+	Namespace string `gorm:"column:namespace;type:text;uniqueIndex;not null"`
+	Summary   string `gorm:"column:summary;type:text;not null"`
+	ItemCount int    `gorm:"column:item_count;type:integer;not null"`
+	// TokenCount is the token cost of Summary, recorded so budgeting does not have to recount.
+	TokenCount int `gorm:"column:token_count;type:integer;default:0"`
+	// Fingerprint identifies the memories the digest was built from (count + ids + update times).
+	// A cached digest whose fingerprint differs from the namespace is stale and recomputed.
+	Fingerprint *string   `gorm:"column:fingerprint;type:text"`
+	UpdatedAt   time.Time `gorm:"column:updated_at;type:datetime;not null"`
 }
 
 // TableName specifies the table name for NamespaceSummary
@@ -150,17 +153,22 @@ func (NamespaceSummary) TableName() string {
 	return "namespace_summaries"
 }
 
-// NamespacePolicy stores configuration policies for namespaces.
-// Supports exact match and prefix match (e.g., "task/projA/*").
+// NamespacePolicy stores the configuration of a namespace. The namespace may be an exact name or a
+// wildcard rule (e.g. "task/projA/*"); the most specific rule wins.
+//
+// The columns intentionally carry no database-level defaults: every field has a legitimate zero
+// value (SummaryEnabled=false, no TTL, no sliding renewal), and GORM omits zero-valued fields that
+// declare a default, which would silently store the opposite of what a caller asked for.
+// Start from DefaultNamespacePolicy(nsType) and override what you need.
 type NamespacePolicy struct {
 	Namespace                 string    `gorm:"column:namespace;type:text;primaryKey"`
 	TTLSeconds                *int      `gorm:"column:ttl_seconds;type:integer"` // nil means never expires
-	TTLPolicy                 TTLPolicy `gorm:"column:ttl_policy;type:text;default:'fixed'"`
-	SlidingTTLThreshold       int       `gorm:"column:sliding_ttl_threshold;type:integer;default:3"`
-	SummaryEnabled            bool      `gorm:"column:summary_enabled;type:boolean;default:1"`
-	SummaryItemTokenThreshold int       `gorm:"column:summary_item_token_threshold;type:integer;default:500"`
-	RankWeightsJSON           string    `gorm:"column:rank_weights_json;type:text;default:'{\"fts\":0.55,\"recency\":0.20,\"importance\":0.15,\"confidence\":0.10}'"`
-	DefaultTopK               int       `gorm:"column:default_top_k;type:integer;default:10"`
+	TTLPolicy                 TTLPolicy `gorm:"column:ttl_policy;type:text"`
+	SlidingTTLThreshold       int       `gorm:"column:sliding_ttl_threshold;type:integer"`
+	SummaryEnabled            bool      `gorm:"column:summary_enabled;type:boolean"`
+	SummaryItemTokenThreshold int       `gorm:"column:summary_item_token_threshold;type:integer"`
+	RankWeightsJSON           string    `gorm:"column:rank_weights_json;type:text"`
+	DefaultTopK               int       `gorm:"column:default_top_k;type:integer"`
 	CreatedAt                 time.Time `gorm:"column:created_at;type:datetime;not null"`
 	UpdatedAt                 time.Time `gorm:"column:updated_at;type:datetime;not null"`
 }

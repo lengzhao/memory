@@ -209,6 +209,28 @@ stats, _ := svc.Stats(ctx)   // 条目分布、索引是否同步、归档积压
 err := svc.Health(ctx)
 ```
 
+### 上下文装配（按预算召回）
+
+```go
+bundle, err := svc.RecallContext(ctx, scope, memory.RecallRequest{
+    NamespaceTypes: []memory.NamespaceType{memory.NamespaceTransient, memory.NamespaceAction},
+}, memory.RecallBudget{
+    MaxTokens:                 800,   // 记忆块总预算（按渲染后文本计量）
+    MaxItems:                  10,
+    PerItemMaxTokens:          120,   // 单条上限，防止一条长记忆独占
+    IncludeSummaryText:        true,  // 有条目摘要时优先用摘要
+    IncludeNamespaceSummary:   true,  // 追加命名空间概览（确定性生成，不调 LLM）
+    NamespaceSummaryMaxTokens: 200,
+})
+fmt.Println(bundle.Text, bundle.Tokens, bundle.Truncated)
+```
+
+- `bundle.Tokens == memory.CountTokens(bundle.Text)`，预算就是"模型能读到多少"。
+- 被截断的条目在 `bundle.Items[i].Truncated` 标出，全文仍在库里，可按 ID 取回。
+- 宿主可用 `memory.SetTokenCounter(...)` 换成自己模型的精确分词器。
+- 命名空间概览由 `RefreshNamespaceSummary` 生成并缓存（内容指纹 + 时效），受命名空间策略的
+  `SummaryEnabled` / `SummaryItemTokenThreshold` 约束。
+
 刻意的设计取舍见 [docs/p0-fixes.md](docs/p0-fixes.md)。
 
 ## 许可证

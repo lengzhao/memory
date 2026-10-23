@@ -119,40 +119,98 @@ func matchPolicy(policies []model.NamespacePolicy, namespace string) (model.Name
 	return best, found
 }
 
-// SetPolicy sets a custom policy for a namespace. The namespace may be an exact name or a
-// wildcard rule like "knowledge/projA/*".
+// DefaultNamespacePolicy returns the baseline policy of a namespace type, so callers can override
+// individual fields without restating the rest:
+//
+//	policy := memory.DefaultNamespacePolicy(memory.NamespaceKnowledge)
+//	policy.SummaryEnabled = false
+//	pm.SetPolicy(ctx, policy)
+func DefaultNamespacePolicy(nsType model.NamespaceType) model.NamespacePolicy {
+	policy, ok := defaultNamespacePolicies[nsType]
+	if !ok {
+		policy = defaultNamespacePolicies[model.NamespaceTypeTransient]
+	}
+	policy.CreatedAt, policy.UpdatedAt = time.Time{}, time.Time{}
+	return policy
+}
+
+// Policy returns the baseline policy of a namespace type, already bound to the namespace that the
+// scope would write that type into. It is the scoped counterpart of DefaultNamespacePolicy:
+//
+//	policy := scope.Policy(memory.NamespaceKnowledge)
+//	policy.SummaryEnabled = false
+//	policyManager.SetPolicy(ctx, policy)
+func (s Scope) Policy(nsType model.NamespaceType) model.NamespacePolicy {
+	policy := DefaultNamespacePolicy(nsType)
+	policy.Namespace = s.Namespace(nsType)
+	return policy
+}
+
+// SetPolicy writes a namespace policy. The namespace may be an exact name or a wildcard rule like
+// "knowledge/projA/*"; the most specific matching rule wins at read time.
+//
+// The policy replaces the stored one: every field is written verbatim, including SummaryEnabled=false
+// and a zero token threshold. Start from DefaultNamespacePolicy to get sensible baselines.
 func (pm *PolicyManager) SetPolicy(ctx context.Context, policy model.NamespacePolicy) error {
 	if strings.TrimSpace(policy.Namespace) == "" {
 		return newErr(CodeValidation, "namespace must not be empty")
 	}
+	// Two fields cannot legitimately be empty: an empty weight document would silently fall back to
+	// the built-in weights, and an empty TTL policy has no meaning. Fill them from the type default.
+	if strings.TrimSpace(policy.RankWeightsJSON) == "" {
+		policy.RankWeightsJSON = defaultNamespacePolicies[model.NamespaceTypeTransient].RankWeightsJSON
+		if base, ok := defaultNamespacePolicies[inferNamespaceType(policy.Namespace)]; ok {
+			policy.RankWeightsJSON = base.RankWeightsJSON
+		}
+	}
+	if policy.TTLPolicy == "" {
+		policy.TTLPolicy = model.TTLPolicyManual
+	}
+	if policy.DefaultTopK <= 0 {
+		policy.DefaultTopK = defaultTopK
+	}
+
 	now := time.Now()
 	policy.CreatedAt = now
 	policy.UpdatedAt = now
 
 	var existing model.NamespacePolicy
 	err := pm.db.WithContext(ctx).Where("namespace = ?", policy.Namespace).First(&existing).Error
-	if err != nil {
-		if err == gorm.ErrRecordNotFound {
-			// Create new
-			if err := pm.db.WithContext(ctx).Create(&policy).Error; err != nil {
-				return wrapErr(CodeInternal, "create policy failed", err)
-			}
-			return nil
+	switch {
+	case err == gorm.ErrRecordNotFound:
+		if err := pm.db.WithContext(ctx).Create(&policy).Error; err != nil {
+			return wrapErr(CodeInternal, "create policy failed", err)
 		}
+		return nil
+	case err != nil:
 		return wrapErr(CodeInternal, "query policy failed", err)
 	}
 
-	// Update existing
-	policy.CreatedAt = existing.CreatedAt
-	if err := pm.db.WithContext(ctx).Save(&policy).Error; err != nil {
+	// Update existing: an explicit column map keeps false/0/nil meaningful instead of being skipped
+	// as "unset".
+	updates := map[string]interface{}{
+		"ttl_seconds":                  policy.TTLSeconds,
+		"ttl_policy":                   policy.TTLPolicy,
+		"sliding_ttl_threshold":        policy.SlidingTTLThreshold,
+		"summary_enabled":              policy.SummaryEnabled,
+		"summary_item_token_threshold": policy.SummaryItemTokenThreshold,
+		"rank_weights_json":            policy.RankWeightsJSON,
+		"default_top_k":                policy.DefaultTopK,
+		"updated_at":                   now,
+	}
+	if err := pm.db.WithContext(ctx).Model(&model.NamespacePolicy{}).
+		Where("namespace = ?", policy.Namespace).
+		Updates(updates).Error; err != nil {
 		return wrapErr(CodeInternal, "update policy failed", err)
 	}
-
 	return nil
 }
 
 // GetRankWeights parses the rank weights JSON from a policy.
 func (pm *PolicyManager) GetRankWeights(policy model.NamespacePolicy) (fts, recency, importance, confidence float64) {
+	if strings.TrimSpace(policy.RankWeightsJSON) == "" {
+		return defaultRankFTS, defaultRankRecency, defaultRankImportance, defaultRankConfidence
+	}
 	var weights struct {
 		FTS        float64 `json:"fts"`
 		Recency    float64 `json:"recency"`
@@ -160,11 +218,21 @@ func (pm *PolicyManager) GetRankWeights(policy model.NamespacePolicy) (fts, rece
 		Confidence float64 `json:"confidence"`
 	}
 	if err := json.Unmarshal([]byte(policy.RankWeightsJSON), &weights); err != nil {
-		// Return defaults
-		return 0.55, 0.20, 0.15, 0.10
+		return defaultRankFTS, defaultRankRecency, defaultRankImportance, defaultRankConfidence
 	}
 	return weights.FTS, weights.Recency, weights.Importance, weights.Confidence
 }
+
+// Built-in fallback rank weights.
+const (
+	defaultRankFTS        = 0.55
+	defaultRankRecency    = 0.20
+	defaultRankImportance = 0.15
+	defaultRankConfidence = 0.10
+)
+
+// defaultTopK is the recall fan-out used when a policy does not specify one.
+const defaultTopK = 10
 
 // inferNamespaceType extracts the namespace type from a namespace string.
 //

@@ -1233,3 +1233,493 @@ func TestConfig_StoreDefaults(t *testing.T) {
 		t.Fatal("expected a busy timeout by default")
 	}
 }
+
+// ---- Token accounting -----------------------------------------------------------------------
+
+func TestTokenCounter_EstimatesConservative(t *testing.T) {
+	if got := CountTokens(""); got != 0 {
+		t.Fatalf("expected 0 tokens for empty text, got %d", got)
+	}
+	if got := CountTokens("你好世界"); got != 4 {
+		t.Fatalf("expected 4 tokens for 4 CJK runes, got %d", got)
+	}
+	// Latin text is charged at ~4 characters per token, rounded up ("hello" + "world" = 2 + 2).
+	if got := CountTokens("hello world"); got != 4 {
+		t.Fatalf("expected 4 tokens for 'hello world', got %d", got)
+	}
+	if got := CountTokens("codegraph init --workspace"); got == 0 {
+		t.Fatal("expected a positive estimate for mixed text")
+	}
+
+	// Trimming never exceeds the budget and never splits a rune.
+	text := strings.Repeat("重要信息 ", 20)
+	trimmed := trimToTokens(text, 10)
+	if CountTokens(trimmed) > 10 {
+		t.Fatalf("trim exceeded the budget: %q", trimmed)
+	}
+	if trimmed == "" || !strings.HasPrefix(text, trimmed) {
+		t.Fatalf("expected a prefix of the input, got %q", trimmed)
+	}
+	if strings.Contains(trimmed, "\uFFFD") {
+		t.Fatal("trimming split a multi-byte character")
+	}
+
+	// The counter is injectable so hosts can plug in an exact tokenizer.
+	SetTokenCounter(func(string) int { return 1 })
+	defer SetTokenCounter(nil)
+	if got := CountTokens("anything"); got != 1 {
+		t.Fatalf("expected the injected counter, got %d", got)
+	}
+	if got := CountTokens("anything"); got != 1 {
+		t.Fatalf("expected the injected counter to persist, got %d", got)
+	}
+	if got := CountTokens(strings.Repeat("x", 1000)); got != 1 {
+		t.Fatalf("expected the injected counter to be used after reset, got %d", got)
+	}
+	SetTokenCounter(nil)
+	if got := CountTokens("你好"); got != 2 {
+		t.Fatalf("expected the default counter after reset, got %d", got)
+	}
+}
+
+// ---- Context assembly -----------------------------------------------------------------------
+
+func TestRecallContext_FitsBudgetAndReportsTruncation(t *testing.T) {
+	svc, _ := newSvc(t)
+	ctx := context.Background()
+	scope := testScope()
+
+	// Eight memories, each long enough that they cannot all fit.
+	for i := 0; i < 8; i++ {
+		if _, err := svc.Remember(ctx, scope, RememberRequest{
+			NamespaceType: model.NamespaceTypeKnowledge,
+			Title:         "topic " + itoa(i),
+			Content:       strings.Repeat("记忆内容细节 ", 30),
+			Confidence:    0.9,
+		}); err != nil {
+			t.Fatalf("remember failed: %v", err)
+		}
+	}
+
+	bundle, err := svc.RecallContext(ctx, scope, RecallRequest{NamespaceTypes: []model.NamespaceType{model.NamespaceTypeKnowledge}}, RecallBudget{
+		MaxTokens: 120,
+	})
+	if err != nil {
+		t.Fatalf("RecallContext failed: %v", err)
+	}
+	if bundle.Tokens > 120 {
+		t.Fatalf("bundle exceeds the budget: %d tokens", bundle.Tokens)
+	}
+	if bundle.Tokens != CountTokens(bundle.Text) {
+		t.Fatalf("reported tokens (%d) disagree with the assembled text (%d)", bundle.Tokens, CountTokens(bundle.Text))
+	}
+	if bundle.Text == "" {
+		t.Fatal("expected assembled text")
+	}
+	if !bundle.Truncated {
+		t.Fatal("expected the budget to report truncation")
+	}
+	if bundle.Candidates != 8 {
+		t.Fatalf("expected all 8 memories to be considered, got %d", bundle.Candidates)
+	}
+	if len(bundle.Items) == 0 {
+		t.Fatal("expected at least one bundled memory")
+	}
+
+	sum := 0
+	for _, item := range bundle.Items {
+		sum += item.Tokens
+		if item.ID == "" || item.Text == "" {
+			t.Fatalf("incomplete bundle item: %+v", item)
+		}
+	}
+	if sum > 120 {
+		t.Fatalf("items exceed the budget: %d", sum)
+	}
+}
+
+func TestRecallContext_MaxItemsAndPerItemCap(t *testing.T) {
+	svc, _ := newSvc(t)
+	ctx := context.Background()
+	scope := testScope()
+	knowledge := []model.NamespaceType{model.NamespaceTypeKnowledge}
+
+	for i := 0; i < 5; i++ {
+		svc.Remember(ctx, scope, RememberRequest{
+			NamespaceType: model.NamespaceTypeKnowledge,
+			Title:         "item " + itoa(i),
+			Content:       strings.Repeat("内容内容内容 ", 40),
+			Importance:    100 - i,
+			Confidence:    0.9,
+		})
+	}
+
+	bundle, err := svc.RecallContext(ctx, scope, RecallRequest{NamespaceTypes: knowledge}, RecallBudget{
+		MaxItems:         2,
+		PerItemMaxTokens: 40,
+	})
+	if err != nil {
+		t.Fatalf("RecallContext failed: %v", err)
+	}
+	if len(bundle.Items) != 2 {
+		t.Fatalf("expected exactly 2 items, got %d", len(bundle.Items))
+	}
+	for _, item := range bundle.Items {
+		// PerItemMaxTokens bounds the memory text; Tokens is the rendered cost (bullet + marker).
+		if CountTokens(item.Text) > 40 {
+			t.Fatalf("per-item cap violated: text is %d tokens", CountTokens(item.Text))
+		}
+		if !item.Truncated {
+			t.Fatalf("expected the long memory to be marked truncated: %+v", item)
+		}
+	}
+
+	// An unbudgeted bundle keeps every candidate and reports no truncation.
+	full, err := svc.RecallContext(ctx, scope, RecallRequest{NamespaceTypes: knowledge, TopK: 5}, RecallBudget{})
+	if err != nil {
+		t.Fatalf("RecallContext failed: %v", err)
+	}
+	if len(full.Items) != 5 || full.Truncated {
+		t.Fatalf("expected a complete, untruncated bundle, got %d items truncated=%v", len(full.Items), full.Truncated)
+	}
+}
+
+func TestRecallContext_EmptyResult(t *testing.T) {
+	svc, _ := newSvc(t)
+	bundle, err := svc.RecallContext(context.Background(), testScope(), RecallRequest{Query: "nothing matches this"}, RecallBudget{MaxTokens: 200})
+	if err != nil {
+		t.Fatalf("RecallContext failed: %v", err)
+	}
+	if bundle.Text != "" || bundle.Tokens != 0 || len(bundle.Items) != 0 || bundle.Candidates != 0 {
+		t.Fatalf("expected an empty bundle, got %+v", bundle)
+	}
+}
+
+func TestRecallContext_FormalizerAndSummaryText(t *testing.T) {
+	svc, _ := newSvc(t)
+	ctx := context.Background()
+	scope := testScope()
+
+	svc.Remember(ctx, scope, RememberRequest{
+		NamespaceType: model.NamespaceTypeProfile,
+		Title:         "Theme",
+		Content:       "The user prefers a dark theme, and dislikes bright surfaces.",
+		Summary:       "prefers dark theme",
+		Confidence:    0.9,
+	})
+
+	bundle, err := svc.RecallContext(ctx, scope, RecallRequest{NamespaceTypes: []model.NamespaceType{model.NamespaceTypeProfile}}, RecallBudget{
+		IncludeSummaryText: true,
+		MaxTokens:          50,
+	})
+	if err != nil {
+		t.Fatalf("RecallContext failed: %v", err)
+	}
+	if len(bundle.Items) != 1 || !strings.Contains(bundle.Items[0].Text, "prefers dark theme") {
+		t.Fatalf("expected the summary to be preferred, got %+v", bundle.Items)
+	}
+	if strings.Contains(bundle.Items[0].Text, "bright surfaces") {
+		t.Fatal("expected the full content to be replaced by the summary")
+	}
+
+	custom, err := svc.RecallContext(ctx, scope, RecallRequest{NamespaceTypes: []model.NamespaceType{model.NamespaceTypeProfile}}, RecallBudget{
+		Formalizer: func(_ context.Context, hits []MemoryHit) string {
+			return "custom(" + itoa(len(hits)) + ")"
+		},
+	})
+	if err != nil {
+		t.Fatalf("RecallContext failed: %v", err)
+	}
+	if custom.Text != "custom(1)" {
+		t.Fatalf("expected the custom formalizer output, got %q", custom.Text)
+	}
+}
+
+// ---- Namespace digests ----------------------------------------------------------------------
+
+func TestNamespaceSummary_RefreshCacheAndPolicy(t *testing.T) {
+	db := store.SetupTestDB(t)
+	svc := NewMemoryService(db)
+	ctx := context.Background()
+	scope := testScope()
+	knowledgeNS := scope.Namespace(model.NamespaceTypeKnowledge)
+
+	for i := 0; i < 3; i++ {
+		if _, err := svc.Remember(ctx, scope, RememberRequest{
+			NamespaceType: model.NamespaceTypeKnowledge,
+			Title:         "topic " + itoa(i),
+			Content:       strings.Repeat("细节 ", 60),
+			Tags:          []string{"go", "sqlite"},
+			Importance:    90 - i,
+			Confidence:    0.9,
+		}); err != nil {
+			t.Fatalf("remember failed: %v", err)
+		}
+	}
+
+	digest, err := svc.RefreshNamespaceSummary(ctx, scope, knowledgeNS)
+	if err != nil {
+		t.Fatalf("RefreshNamespaceSummary failed: %v", err)
+	}
+	if digest.ItemCount != 3 {
+		t.Fatalf("expected 3 items in the digest, got %d", digest.ItemCount)
+	}
+	if !strings.Contains(digest.Summary, "3 memories") {
+		t.Fatalf("expected a count line in the digest, got %q", digest.Summary)
+	}
+	if !strings.Contains(digest.Summary, "topics:") {
+		t.Fatalf("expected the tag rollup in the digest, got %q", digest.Summary)
+	}
+	if !digest.Stale {
+		t.Fatal("expected the first computation to be reported as freshly computed")
+	}
+
+	// Second call within the freshness window reuses the cached digest.
+	cached, err := svc.RefreshNamespaceSummary(ctx, scope, knowledgeNS)
+	if err != nil {
+		t.Fatalf("RefreshNamespaceSummary failed: %v", err)
+	}
+	if cached.Stale {
+		t.Fatal("expected the cached digest to be reused")
+	}
+	if cached.Summary != digest.Summary {
+		t.Fatalf("cached digest differs:\n got %q\nwant %q", cached.Summary, digest.Summary)
+	}
+
+	// A new memory invalidates it.
+	if _, err := svc.Remember(ctx, scope, RememberRequest{NamespaceType: model.NamespaceTypeKnowledge, Title: "new topic", Content: "new content", Confidence: 0.9}); err != nil {
+		t.Fatalf("remember failed: %v", err)
+	}
+	refreshed, err := svc.RefreshNamespaceSummary(ctx, scope, knowledgeNS)
+	if err != nil {
+		t.Fatalf("RefreshNamespaceSummary failed: %v", err)
+	}
+	if !refreshed.Stale || refreshed.ItemCount != 4 {
+		t.Fatalf("expected the digest to be recomputed, got stale=%v count=%d", refreshed.Stale, refreshed.ItemCount)
+	}
+
+	// SummaryEnabled=false (policy) switches the digest off.
+	if err := NewPolicyManager(db).SetPolicy(ctx, model.NamespacePolicy{Namespace: knowledgeNS, SummaryEnabled: false}); err != nil {
+		t.Fatalf("SetPolicy failed: %v", err)
+	}
+	if err := db.Model(&model.NamespaceSummary{}).Where("namespace = ?", knowledgeNS).Update("updated_at", time.Now().Add(-time.Hour)).Error; err != nil {
+		t.Fatalf("aging the cache failed: %v", err)
+	}
+	disabled, err := svc.RefreshNamespaceSummary(ctx, scope, knowledgeNS)
+	if err != nil {
+		t.Fatalf("RefreshNamespaceSummary failed: %v", err)
+	}
+	if disabled.Summary != "" {
+		t.Fatalf("expected summaries to be disabled by policy, got %q", disabled.Summary)
+	}
+	if disabled.ItemCount != 4 {
+		t.Fatalf("expected the item count to remain available, got %d", disabled.ItemCount)
+	}
+}
+
+func TestNamespaceSummary_GenerateExplicitAndScopeGuard(t *testing.T) {
+	svc, _ := newSvc(t)
+	ctx := context.Background()
+	scope := testScope()
+	profileNS := scope.Namespace(model.NamespaceTypeProfile)
+
+	// Nothing to summarise yet.
+	if _, err := svc.GenerateNamespaceSummary(ctx, scope, profileNS); err == nil {
+		t.Fatal("expected an error for an empty namespace")
+	}
+
+	svc.Remember(ctx, scope, RememberRequest{NamespaceType: model.NamespaceTypeProfile, Content: "prefers dark theme", Confidence: 0.9})
+
+	text, err := svc.GenerateNamespaceSummary(ctx, scope, profileNS)
+	if err != nil {
+		t.Fatalf("GenerateNamespaceSummary failed: %v", err)
+	}
+	if !strings.Contains(text, "prefers dark theme") {
+		t.Fatalf("expected the memory to appear in the digest, got %q", text)
+	}
+
+	// A namespace outside the scope cannot be summarised, and the caller learns nothing about it.
+	var memErr *MemoryError
+	if _, err := svc.GenerateNamespaceSummary(ctx, testScope(), otherTenantScope().Namespace(model.NamespaceTypeProfile)); !errors.As(err, &memErr) || memErr.Code != CodeUnauthorized {
+		t.Fatalf("expected UNAUTHORIZED for a foreign namespace, got %v", err)
+	}
+	if _, err := svc.RefreshNamespaceSummary(ctx, testScope(), "profile/default"); !errors.As(err, &memErr) || memErr.Code != CodeUnauthorized {
+		t.Fatalf("expected UNAUTHORIZED for the global namespace in scoped mode, got %v", err)
+	}
+}
+
+func TestRecallContext_IncludesNamespaceSummaryWithinBudget(t *testing.T) {
+	svc, _ := newSvc(t)
+	ctx := context.Background()
+	scope := testScope()
+
+	for i := 0; i < 4; i++ {
+		svc.Remember(ctx, scope, RememberRequest{
+			NamespaceType: model.NamespaceTypeKnowledge,
+			Title:         "主题" + itoa(i),
+			Content:       strings.Repeat("要点内容 ", 40),
+			Tags:          []string{"go"},
+			Confidence:    0.9,
+		})
+	}
+
+	bundle, err := svc.RecallContext(ctx, scope, RecallRequest{NamespaceTypes: []model.NamespaceType{model.NamespaceTypeKnowledge}}, RecallBudget{
+		MaxItems:                  1,
+		IncludeNamespaceSummary:   true,
+		NamespaceSummaryMaxTokens: 200,
+		MaxTokens:                 400,
+	})
+	if err != nil {
+		t.Fatalf("RecallContext failed: %v", err)
+	}
+	if len(bundle.NamespaceSummaries) != 1 {
+		t.Fatalf("expected one namespace digest, got %d", len(bundle.NamespaceSummaries))
+	}
+	if !strings.Contains(bundle.Text, "Namespace:") {
+		t.Fatalf("expected the digest in the assembled text, got %q", bundle.Text)
+	}
+	if bundle.Tokens > 400 {
+		t.Fatalf("bundle exceeds the budget: %d", bundle.Tokens)
+	}
+	// The digest itself honours its own cap.
+	if bundle.NamespaceSummaries[0].Tokens > 200 {
+		t.Fatalf("digest exceeds its budget: %d", bundle.NamespaceSummaries[0].Tokens)
+	}
+}
+
+// ---- Item summaries -------------------------------------------------------------------------
+
+func TestGenerateItemSummary_DerivesFromContent(t *testing.T) {
+	svc, db := newSvc(t)
+	ctx := context.Background()
+	scope := testScope()
+
+	id, err := svc.Remember(ctx, scope, RememberRequest{
+		NamespaceType: model.NamespaceTypeKnowledge,
+		Title:         "SQLite 并发",
+		Content:       "SQLite 使用 WAL 支持并发读。写操作是串行的，需要 busy_timeout。第三句不应该出现在摘要里，因为它超出了预算。",
+		Confidence:    0.9,
+	})
+	if err != nil {
+		t.Fatalf("remember failed: %v", err)
+	}
+
+	gen := NewSummaryGenerator(db)
+	if err := gen.GenerateItemSummary(ctx, scope, id, 25); err != nil {
+		t.Fatalf("GenerateItemSummary failed: %v", err)
+	}
+
+	var item model.MemoryItem
+	db.First(&item, "id = ?", id)
+	if item.Summary == "" {
+		t.Fatal("expected a derived summary")
+	}
+	if CountTokens(item.Summary) > 25 {
+		t.Fatalf("summary exceeds the budget: %q (%d tokens)", item.Summary, CountTokens(item.Summary))
+	}
+	if !strings.Contains(item.Summary, "SQLite") {
+		t.Fatalf("expected the subject to survive summarisation, got %q", item.Summary)
+	}
+	if strings.Contains(item.Summary, "第三句") {
+		t.Fatalf("expected the summary to stop at a sentence boundary, got %q", item.Summary)
+	}
+
+	// A summary generated for another tenant's memory must not be reachable.
+	var memErr *MemoryError
+	if err := gen.GenerateItemSummary(ctx, otherTenantScope(), id, 25); !errors.As(err, &memErr) || memErr.Code != CodeNotFound {
+		t.Fatalf("expected NOT_FOUND for a foreign memory, got %v", err)
+	}
+
+	// Short content is summarised verbatim.
+	shortID, _ := svc.Remember(ctx, scope, RememberRequest{NamespaceType: model.NamespaceTypeProfile, Content: "用户偏好中文回复", Confidence: 0.9})
+	if err := gen.GenerateItemSummary(ctx, scope, shortID, 60); err != nil {
+		t.Fatalf("GenerateItemSummary failed: %v", err)
+	}
+	var short model.MemoryItem
+	db.First(&short, "id = ?", shortID)
+	if !strings.Contains(short.Summary, "用户偏好中文回复") {
+		t.Fatalf("expected short content to be kept intact, got %q", short.Summary)
+	}
+}
+
+// ---- Policy persistence ---------------------------------------------------------------------
+
+func TestSetPolicy_PersistsZeroValuedFields(t *testing.T) {
+	db := store.SetupTestDB(t)
+	ctx := context.Background()
+	pm := NewPolicyManager(db)
+	namespace := testScope().Namespace(model.NamespaceTypeKnowledge)
+
+	// The scope-bound baseline targets the namespace this scope actually writes to.
+	policy := testScope().Policy(model.NamespaceTypeKnowledge)
+	if policy.Namespace != namespace {
+		t.Fatalf("expected the policy to be bound to %q, got %q", namespace, policy.Namespace)
+	}
+
+	// A policy whose meaning is carried by zero values: summaries off, no TTL, no sliding renewal.
+	policy.SummaryEnabled = false
+	policy.SlidingTTLThreshold = 0
+	policy.TTLSeconds = nil
+	if err := pm.SetPolicy(ctx, policy); err != nil {
+		t.Fatalf("SetPolicy failed: %v", err)
+	}
+
+	resolved, err := pm.GetPolicy(ctx, namespace)
+	if err != nil {
+		t.Fatalf("GetPolicy failed: %v", err)
+	}
+	if resolved.SummaryEnabled {
+		t.Fatal("SummaryEnabled=false was not persisted (zero values must survive a write)")
+	}
+	if resolved.TTLSeconds != nil {
+		t.Fatalf("expected no TTL, got %v", *resolved.TTLSeconds)
+	}
+
+	// Explicitly turning it back on also round-trips.
+	policy.SummaryEnabled = true
+	policy.SummaryItemTokenThreshold = 300
+	if err := pm.SetPolicy(ctx, policy); err != nil {
+		t.Fatalf("SetPolicy failed: %v", err)
+	}
+	resolved, _ = pm.GetPolicy(ctx, namespace)
+	if !resolved.SummaryEnabled || resolved.SummaryItemTokenThreshold != 300 {
+		t.Fatalf("expected the updated policy, got %+v", resolved)
+	}
+
+	// A policy built only from a namespace does not lose the rank weights.
+	bare := model.NamespacePolicy{Namespace: namespace, SummaryEnabled: false}
+	if err := pm.SetPolicy(ctx, bare); err != nil {
+		t.Fatalf("SetPolicy failed: %v", err)
+	}
+	resolved, _ = pm.GetPolicy(ctx, namespace)
+	fts, recency, importance, confidence := pm.GetRankWeights(resolved)
+	if fts+recency+importance+confidence <= 0 {
+		t.Fatalf("expected usable rank weights, got %v/%v/%v/%v", fts, recency, importance, confidence)
+	}
+}
+
+func TestRemember_DefaultConfidenceIsRecallable(t *testing.T) {
+	svc, db := newSvc(t)
+	ctx := context.Background()
+	scope := testScope()
+
+	id, err := svc.Remember(ctx, scope, RememberRequest{NamespaceType: model.NamespaceTypeKnowledge, Content: "unscored memory"})
+	if err != nil {
+		t.Fatalf("remember failed: %v", err)
+	}
+	var item model.MemoryItem
+	if err := db.First(&item, "id = ?", id).Error; err != nil {
+		t.Fatalf("reload failed: %v", err)
+	}
+	if item.Confidence != DefaultConfidence {
+		t.Fatalf("expected the default confidence %v, got %v", DefaultConfidence, item.Confidence)
+	}
+
+	hits, err := svc.Recall(ctx, scope, RecallRequest{Query: "unscored", TopK: 5})
+	if err != nil {
+		t.Fatalf("recall failed: %v", err)
+	}
+	if len(hits) != 1 {
+		t.Fatalf("expected the unscored memory to be recallable at the default floor, got %d", len(hits))
+	}
+}

@@ -61,6 +61,11 @@ func (s *MemoryService) WithConfig(config Config) *MemoryService {
 // MaxContentRunes bounds the size of a single memory row.
 const MaxContentRunes = 100_000
 
+// DefaultConfidence is stored for a memory whose request did not state a confidence. It is high
+// because an unscored memory should not be filtered out by DefaultMinConfidence, while a host that
+// wants a memory to rank lower states a lower value.
+const DefaultConfidence = 1.0
+
 // RememberRequest stores one memory.
 //
 // The scope is an argument, not a context value: an operation without a scope is a compile error.
@@ -125,6 +130,14 @@ func (s *MemoryService) Remember(ctx context.Context, scope Scope, req RememberR
 		return "", err
 	}
 
+	// An unset confidence means "not scored by the host", which is the honest reading of a memory
+	// that must still be recallable. Normalising it here keeps the stored value meaningful instead
+	// of depending on a column default.
+	confidence := req.Confidence
+	if confidence == 0 {
+		confidence = DefaultConfidence
+	}
+
 	tagsJSON, _ := json.Marshal(req.Tags)
 	// Always build a fresh row: GORM reuses the primary key of a populated model on Create, so a
 	// recycled struct silently overwrites the row it was loaded from.
@@ -140,7 +153,7 @@ func (s *MemoryService) Remember(ctx context.Context, scope Scope, req RememberR
 		SourceType:    req.SourceType,
 		SourceRef:     req.SourceRef,
 		Importance:    req.Importance,
-		Confidence:    req.Confidence,
+		Confidence:    confidence,
 		Status:        model.ItemStatusActive,
 		ExpiresAt:     expiresAt,
 		CreatedAt:     now,
