@@ -19,8 +19,8 @@ func TestMaintenance_PurgeDeleted(t *testing.T) {
 	// Create and soft-delete items
 	ids := make([]string, 3)
 	for i := 0; i < 3; i++ {
-		id, err := svc.Remember(ctx, memory.RememberRequest{
-			Content:   "Content to purge",
+		id, err := svc.Remember(ctx, testScope(), memory.RememberRequest{
+			Content: "Content to purge",
 		})
 		if err != nil {
 			t.Fatalf("Failed to create: %v", err)
@@ -29,7 +29,7 @@ func TestMaintenance_PurgeDeleted(t *testing.T) {
 	}
 
 	// Soft delete all
-	_, err := svc.Forget(ctx, memory.ForgetRequest{
+	_, err := svc.Forget(ctx, testScope(), memory.ForgetRequest{
 		ItemIDs: ids,
 		Mode:    "soft",
 	})
@@ -74,10 +74,10 @@ func TestMaintenance_PurgeDeletedByTime(t *testing.T) {
 	ctx := testContext()
 
 	// Create and delete item
-	id, _ := svc.Remember(ctx, memory.RememberRequest{
-		Content:   "Old deleted content",
+	id, _ := svc.Remember(ctx, testScope(), memory.RememberRequest{
+		Content: "Old deleted content",
 	})
-	svc.Forget(ctx, memory.ForgetRequest{
+	svc.Forget(ctx, testScope(), memory.ForgetRequest{
 		ItemIDs: []string{id},
 		Mode:    "soft",
 	})
@@ -113,7 +113,7 @@ func TestMaintenance_CleanupExpiredMultiple(t *testing.T) {
 	// Create items with short TTL
 	ttl := 1
 	for i := 0; i < 5; i++ {
-		_, err := svc.Remember(ctx, memory.RememberRequest{
+		_, err := svc.Remember(ctx, testScope(), memory.RememberRequest{
 			Content:    "Expired content",
 			TTLSeconds: &ttl,
 		})
@@ -124,7 +124,7 @@ func TestMaintenance_CleanupExpiredMultiple(t *testing.T) {
 
 	// Create one non-expired item
 	ttlFuture := 3600
-	_, err := svc.Remember(ctx, memory.RememberRequest{
+	_, err := svc.Remember(ctx, testScope(), memory.RememberRequest{
 		Content:    "Non-expired content",
 		TTLSeconds: &ttlFuture,
 	})
@@ -146,11 +146,12 @@ func TestMaintenance_CleanupExpiredMultiple(t *testing.T) {
 
 	// Verify statuses directly in database
 	var activeCount, expiredCount int64
+	namespace := testScope().Namespace(memory.NamespaceTransient)
 	tdb.DB.WithContext(ctx).Model(&model.MemoryItem{}).
-		Where("namespace = ? AND status = ?", "transient/default", model.ItemStatusActive).
+		Where("namespace = ? AND status = ?", namespace, model.ItemStatusActive).
 		Count(&activeCount)
 	tdb.DB.WithContext(ctx).Model(&model.MemoryItem{}).
-		Where("namespace = ? AND status = ?", "transient/default", model.ItemStatusExpired).
+		Where("namespace = ? AND status = ?", namespace, model.ItemStatusExpired).
 		Count(&expiredCount)
 
 	if activeCount != 1 {
@@ -179,8 +180,8 @@ func TestMaintenance_RebuildFTS(t *testing.T) {
 
 	// Create items
 	for i := 0; i < 3; i++ {
-		_, err := svc.Remember(ctx, memory.RememberRequest{
-			Content:   "Content for FTS rebuild",
+		_, err := svc.Remember(ctx, testScope(), memory.RememberRequest{
+			Content: "Content for FTS rebuild",
 		})
 		if err != nil {
 			t.Fatalf("Failed to create: %v", err)
@@ -194,8 +195,7 @@ func TestMaintenance_RebuildFTS(t *testing.T) {
 	}
 
 	// Verify items still exist
-	hits, err := svc.Recall(ctx, memory.RecallRequest{
-	})
+	hits, err := svc.Recall(ctx, testScope(), memory.RecallRequest{})
 	if err != nil {
 		t.Fatalf("Failed to recall after rebuild: %v", err)
 	}

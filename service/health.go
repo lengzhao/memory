@@ -9,9 +9,8 @@ import (
 	"github.com/lengzhao/memory/model"
 )
 
-// Stats is an operational snapshot of the store. It is meant for health endpoints and for
-// alerting on FTS drift (ActiveItems vs IndexedItems) and on the retention backlog
-// (ArchivedItems / ExpiredArchiveItems).
+// Stats is an operational snapshot of the store, meant for health endpoints and for alerting on
+// search-index drift (IndexInSync) and on the deletion-retention backlog (ExpiredArchiveItems).
 type Stats struct {
 	TotalItems          int64            `json:"total_items"`
 	ActiveItems         int64            `json:"active_items"`
@@ -23,32 +22,37 @@ type Stats struct {
 	ArchivedItems       int64            `json:"archived_items"`
 	ExpiredArchiveItems int64            `json:"expired_archive_items"`
 	Extractions         int64            `json:"extractions"`
+	ExtractionsPending  int64            `json:"extractions_pending"`
+	ExtractionFailures  int64            `json:"extraction_failures"`
 	Events              int64            `json:"events"`
 	Policies            int64            `json:"policies"`
 }
 
-// Stats collects the operational snapshot. It takes no isolation identity on purpose: it is an
-// administrative view over the whole store.
+// Stats collects the snapshot. It is deliberately scope-agnostic: this is an administrative view
+// of the whole store, not a user-facing read.
 func (s *MemoryService) Stats(ctx context.Context) (Stats, error) {
 	stats := Stats{ByNamespaceType: map[string]int64{}}
 
 	count := func(query *gorm.DB, target *int64) error {
-		return query.Count(target).Error
+		if err := query.Count(target).Error; err != nil {
+			return wrapErr(CodeInternal, "count failed", err)
+		}
+		return nil
 	}
 
 	if err := count(s.db.WithContext(ctx).Model(&model.MemoryItem{}), &stats.TotalItems); err != nil {
-		return Stats{}, wrapErr(CodeInternal, "count items failed", err)
+		return Stats{}, err
 	}
 	if err := count(s.db.WithContext(ctx).Model(&model.MemoryItem{}).Where("status = ?", model.ItemStatusActive), &stats.ActiveItems); err != nil {
-		return Stats{}, wrapErr(CodeInternal, "count active items failed", err)
+		return Stats{}, err
 	}
 	if err := count(s.db.WithContext(ctx).Model(&model.MemoryItem{}).Where("status = ?", model.ItemStatusDeleted), &stats.SoftDeletedItems); err != nil {
-		return Stats{}, wrapErr(CodeInternal, "count deleted items failed", err)
+		return Stats{}, err
 	}
 	if err := count(s.db.WithContext(ctx).Model(&model.MemoryItem{}).
 		Where("status = ? AND expires_at IS NOT NULL AND expires_at < ?", model.ItemStatusActive, time.Now()),
 		&stats.ExpiredPendingSweep); err != nil {
-		return Stats{}, wrapErr(CodeInternal, "count expired items failed", err)
+		return Stats{}, err
 	}
 
 	var byType []struct {
@@ -66,30 +70,35 @@ func (s *MemoryService) Stats(ctx context.Context) (Stats, error) {
 	}
 
 	if err := s.db.WithContext(ctx).Raw("SELECT COUNT(*) FROM fts_memory").Scan(&stats.IndexedItems).Error; err != nil {
-		return Stats{}, wrapErr(CodeInternal, "count fts rows failed", err)
+		return Stats{}, wrapErr(CodeInternal, "count indexed rows failed", err)
 	}
 	stats.IndexInSync = stats.ActiveItems == stats.IndexedItems
 
 	if err := count(s.db.WithContext(ctx).Model(&model.DeletedItem{}), &stats.ArchivedItems); err != nil {
-		return Stats{}, wrapErr(CodeInternal, "count archived items failed", err)
+		return Stats{}, err
 	}
 	if err := count(s.db.WithContext(ctx).Model(&model.DeletedItem{}).Where("purge_after <= ?", time.Now()), &stats.ExpiredArchiveItems); err != nil {
-		return Stats{}, wrapErr(CodeInternal, "count expired archive failed", err)
+		return Stats{}, err
 	}
 	if err := count(s.db.WithContext(ctx).Model(&model.DialogExtraction{}), &stats.Extractions); err != nil {
-		return Stats{}, wrapErr(CodeInternal, "count extractions failed", err)
+		return Stats{}, err
+	}
+	if err := count(s.db.WithContext(ctx).Model(&model.DialogExtraction{}).Where("status = ?", model.ExtractionStatusPending), &stats.ExtractionsPending); err != nil {
+		return Stats{}, err
+	}
+	if err := count(s.db.WithContext(ctx).Model(&model.DialogExtraction{}).Where("status = ?", model.ExtractionStatusFailed), &stats.ExtractionFailures); err != nil {
+		return Stats{}, err
 	}
 	if err := count(s.db.WithContext(ctx).Model(&model.MemoryEvent{}), &stats.Events); err != nil {
-		return Stats{}, wrapErr(CodeInternal, "count events failed", err)
+		return Stats{}, err
 	}
 	if err := count(s.db.WithContext(ctx).Model(&model.NamespacePolicy{}), &stats.Policies); err != nil {
-		return Stats{}, wrapErr(CodeInternal, "count policies failed", err)
+		return Stats{}, err
 	}
-
 	return stats, nil
 }
 
-// Health reports whether the store is usable and the search index is consistent with it.
+// Health reports whether the store is usable and the search index agrees with it.
 func (s *MemoryService) Health(ctx context.Context) error {
 	if err := s.db.WithContext(ctx).Exec("SELECT 1").Error; err != nil {
 		return wrapErr(CodeInternal, "database unavailable", err)
@@ -99,7 +108,7 @@ func (s *MemoryService) Health(ctx context.Context) error {
 		return err
 	}
 	if !ok {
-		return wrapErr(CodeInternal, "fts index out of sync: run RebuildFTS or re-run Migrate", nil)
+		return wrapErr(CodeInternal, "search index out of sync: run RebuildFTS or Migrate", nil)
 	}
 	return nil
 }

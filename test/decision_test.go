@@ -32,7 +32,7 @@ func TestDecision_FindSimilarMemories(t *testing.T) {
 	}
 
 	for _, content := range contents {
-		_, err := memory.NewMemoryService(tdb.DB).Remember(ctx, memory.RememberRequest{
+		_, err := memory.NewMemoryService(tdb.DB).Remember(ctx, testScope(), memory.RememberRequest{
 			NamespaceType: memory.NamespaceKnowledge,
 			Content:       content,
 			Tags:          []string{"programming", "language"},
@@ -51,7 +51,7 @@ func TestDecision_FindSimilarMemories(t *testing.T) {
 		Tags:      []string{"go", "google"},
 	}
 
-	similar, err := de.FindSimilarMemories(ctx, candidate, 3)
+	similar, err := de.FindSimilarMemories(ctx, testScope(), candidate, 3)
 	if err != nil {
 		t.Fatalf("Failed to find similar: %v", err)
 	}
@@ -90,7 +90,7 @@ func TestDecision_ExecuteAdd(t *testing.T) {
 		},
 	}
 
-	result, err := de.ExecuteDecisions(ctx, candidates, decisions)
+	result, err := de.ExecuteDecisions(ctx, testScope(), candidates, decisions)
 	if err != nil {
 		t.Fatalf("Failed to execute decisions: %v", err)
 	}
@@ -117,7 +117,7 @@ func TestDecision_ExecuteUpdate(t *testing.T) {
 	de := memory.NewDecisionEngine(tdb.DB)
 
 	// Create existing memory
-	id, err := svc.Remember(ctx, memory.RememberRequest{
+	id, err := svc.Remember(ctx, testScope(), memory.RememberRequest{
 		Content:    "Old content that needs updating",
 		Importance: 50,
 	})
@@ -137,15 +137,15 @@ func TestDecision_ExecuteUpdate(t *testing.T) {
 
 	decisions := []service.MemoryDecision{
 		{
-			Decision:   service.DecisionUpdate,
-			TargetID:   id,
-			Reason:     "New information is more complete",
-			Confidence: 0.9,
+			Decision:      service.DecisionUpdate,
+			TargetID:      id,
+			Reason:        "New information is more complete",
+			Confidence:    0.9,
 			NewImportance: 75,
 		},
 	}
 
-	_, err = de.ExecuteDecisions(ctx, candidates, decisions)
+	_, err = de.ExecuteDecisions(ctx, testScope(), candidates, decisions)
 	if err != nil {
 		t.Fatalf("Failed to execute update: %v", err)
 	}
@@ -175,8 +175,8 @@ func TestDecision_ExecuteDelete(t *testing.T) {
 	de := memory.NewDecisionEngine(tdb.DB)
 
 	// Create memory to delete
-	id, err := svc.Remember(ctx, memory.RememberRequest{
-		Content:   "Content to be deleted",
+	id, err := svc.Remember(ctx, testScope(), memory.RememberRequest{
+		Content: "Content to be deleted",
 	})
 	if err != nil {
 		t.Fatalf("Failed to create memory: %v", err)
@@ -198,7 +198,7 @@ func TestDecision_ExecuteDelete(t *testing.T) {
 		},
 	}
 
-	_, err = de.ExecuteDecisions(ctx, candidates, decisions)
+	_, err = de.ExecuteDecisions(ctx, testScope(), candidates, decisions)
 	if err != nil {
 		t.Fatalf("Failed to execute delete: %v", err)
 	}
@@ -221,7 +221,7 @@ func TestDecision_ExecuteMerge(t *testing.T) {
 	de := memory.NewDecisionEngine(tdb.DB)
 
 	// Create existing memory
-	id, err := svc.Remember(ctx, memory.RememberRequest{
+	id, err := svc.Remember(ctx, testScope(), memory.RememberRequest{
 		Content:    "Original information",
 		Tags:       []string{"original"},
 		Importance: 50,
@@ -253,7 +253,7 @@ func TestDecision_ExecuteMerge(t *testing.T) {
 		},
 	}
 
-	_, err = de.ExecuteDecisions(ctx, candidates, decisions)
+	_, err = de.ExecuteDecisions(ctx, testScope(), candidates, decisions)
 	if err != nil {
 		t.Fatalf("Failed to execute merge: %v", err)
 	}
@@ -302,7 +302,7 @@ func TestDecision_ExecuteIgnore(t *testing.T) {
 		},
 	}
 
-	result, err := de.ExecuteDecisions(ctx, candidates, decisions)
+	result, err := de.ExecuteDecisions(ctx, testScope(), candidates, decisions)
 	if err != nil {
 		t.Fatalf("Failed to execute ignore: %v", err)
 	}
@@ -332,7 +332,7 @@ func TestDecision_MismatchedCount(t *testing.T) {
 		{Decision: service.DecisionAdd},
 	}
 
-	_, err := de.ExecuteDecisions(ctx, candidates, decisions)
+	_, err := de.ExecuteDecisions(ctx, testScope(), candidates, decisions)
 	if err == nil {
 		t.Error("Expected error for mismatched count")
 	}

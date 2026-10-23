@@ -13,7 +13,7 @@ import (
 
 func main() {
 	ctx := context.Background()
-	ctx = memory.WithIsolation(ctx, "demo-tenant", "demo-user", "ttl-session", "assistant")
+	scope := memory.MustScope("demo-tenant", "demo-user", "ttl-session", "assistant")
 
 	// 初始化
 	cfg := memory.DefaultConfig()
@@ -32,7 +32,7 @@ func main() {
 	// 场景1: 会话上下文（短TTL）
 	fmt.Println("1. 创建会话上下文（5秒TTL）...")
 	sessionTTL := 5
-	sessionID, err := svc.Remember(ctx, memory.RememberRequest{
+	sessionID, err := svc.Remember(ctx, scope, memory.RememberRequest{
 		NamespaceType: memory.NamespaceTransient,
 		Title:         "当前会话",
 		Content:       "用户正在浏览产品页面",
@@ -47,7 +47,7 @@ func main() {
 	// 场景2: 临时验证码（中等TTL）
 	fmt.Println("\n2. 创建验证码（60秒TTL）...")
 	codeTTL := 60
-	codeID, err := svc.Remember(ctx, memory.RememberRequest{
+	codeID, err := svc.Remember(ctx, scope, memory.RememberRequest{
 		NamespaceType: memory.NamespaceTransient,
 		Title:         "验证码",
 		Content:       "验证码: 123456，用于登录验证",
@@ -63,7 +63,7 @@ func main() {
 	// 场景3: 用户偏好（长TTL）
 	fmt.Println("\n3. 创建用户偏好（1小时TTL）...")
 	prefTTL := 3600 // 1小时
-	prefID, err := svc.Remember(ctx, memory.RememberRequest{
+	prefID, err := svc.Remember(ctx, scope, memory.RememberRequest{
 		NamespaceType: memory.NamespaceProfile,
 		Title:         "临时主题设置",
 		Content:       "用户选择了暗黑模式（实验性功能）",
@@ -78,7 +78,7 @@ func main() {
 
 	// 检查当前状态
 	fmt.Println("\n4. 当前活跃记忆...")
-	hits, _ := svc.Recall(ctx, memory.RecallRequest{
+	hits, _ := svc.Recall(ctx, scope, memory.RecallRequest{
 		NamespaceTypes: []memory.NamespaceType{
 			memory.NamespaceTransient,
 			memory.NamespaceProfile,
@@ -108,7 +108,7 @@ func main() {
 
 	// 检查过期后状态
 	fmt.Println("\n7. 过期后的活跃记忆...")
-	hits, _ = svc.Recall(ctx, memory.RecallRequest{
+	hits, _ = svc.Recall(ctx, scope, memory.RecallRequest{
 		NamespaceTypes: []memory.NamespaceType{
 			memory.NamespaceTransient,
 			memory.NamespaceProfile,
@@ -131,7 +131,7 @@ func main() {
 	// 场景4: 手动续期
 	fmt.Println("\n8. 手动续期验证码...")
 	newTTL := 300 // 延长到5分钟
-	if err := svc.RenewExpiration(ctx, codeID, newTTL); err != nil {
+	if err := svc.RenewExpiration(ctx, scope, codeID, newTTL); err != nil {
 		log.Fatal(err)
 	}
 	fmt.Println("   验证码已续期到5分钟后过期")
@@ -139,7 +139,7 @@ func main() {
 	// 场景5: 滑动TTL（基于访问次数续期）
 	fmt.Println("\n9. 模拟滑动TTL（每3次访问续期）...")
 	slideTTL := 10
-	slideID, _ := svc.Remember(ctx, memory.RememberRequest{
+	slideID, _ := svc.Remember(ctx, scope, memory.RememberRequest{
 		NamespaceType: memory.NamespaceTransient,
 		Title:         "缓存数据",
 		Content:       "频繁访问的查询结果",
@@ -147,7 +147,7 @@ func main() {
 	})
 
 	for i := 1; i <= 5; i++ {
-		renewed, _ := svc.TouchWithRenew(ctx, slideID, 3, 30) // 每3次访问续期30秒
+		renewed, _ := svc.TouchWithRenew(ctx, scope, slideID, 3, 30) // 每3次访问续期30秒
 		if renewed {
 			fmt.Printf("   第%d次访问: TTL已续期\n", i)
 		} else {

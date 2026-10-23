@@ -37,7 +37,7 @@ func TestChineseSearch_Basic(t *testing.T) {
 	}
 
 	for _, item := range items {
-		_, err := svc.Remember(ctx, memory.RememberRequest{
+		_, err := svc.Remember(ctx, testScope(), memory.RememberRequest{
 			NamespaceType: memory.NamespaceKnowledge,
 			Title:         item.title,
 			Content:       item.content,
@@ -51,9 +51,9 @@ func TestChineseSearch_Basic(t *testing.T) {
 	}
 
 	// Search "北京" - should match 2 items (北京旅游、清华大学)
-	hits, err := svc.Recall(ctx, memory.RecallRequest{
-		Query:      "北京",
-		TopK:       10,
+	hits, err := svc.Recall(ctx, testScope(), memory.RecallRequest{
+		Query: "北京",
+		TopK:  10,
 	})
 	if err != nil {
 		t.Fatalf("Failed to recall: %v", err)
@@ -112,7 +112,7 @@ func TestChineseSearch_TopKRanking(t *testing.T) {
 	}
 
 	for _, item := range contents {
-		_, err := svc.Remember(ctx, memory.RememberRequest{
+		_, err := svc.Remember(ctx, testScope(), memory.RememberRequest{
 			NamespaceType: memory.NamespaceKnowledge,
 			Title:         item.title,
 			Content:       item.content,
@@ -126,9 +126,9 @@ func TestChineseSearch_TopKRanking(t *testing.T) {
 	}
 
 	// Search "语言" which should match multiple items
-	hits, err := svc.Recall(ctx, memory.RecallRequest{
-		Query:      "语言",
-		TopK:       5, // Limit to 5 results
+	hits, err := svc.Recall(ctx, testScope(), memory.RecallRequest{
+		Query: "语言",
+		TopK:  5, // Limit to 5 results
 	})
 	if err != nil {
 		t.Fatalf("Failed to recall: %v", err)
@@ -162,7 +162,7 @@ func TestChineseSearch_UpdateReindex(t *testing.T) {
 	ctx := testContext()
 
 	// Create item about Python
-	id, err := svc.Remember(ctx, memory.RememberRequest{
+	id, err := svc.Remember(ctx, testScope(), memory.RememberRequest{
 		NamespaceType: memory.NamespaceKnowledge,
 		Title:         "Python教程",
 		Content:       "Python是流行的编程语言，适合数据分析",
@@ -173,8 +173,8 @@ func TestChineseSearch_UpdateReindex(t *testing.T) {
 	}
 
 	// Verify searchable by "Python"
-	hits, err := svc.Recall(ctx, memory.RecallRequest{
-		Query:      "Python",
+	hits, err := svc.Recall(ctx, testScope(), memory.RecallRequest{
+		Query: "Python",
 	})
 	if err != nil {
 		t.Fatalf("Failed to recall: %v", err)
@@ -192,7 +192,7 @@ func TestChineseSearch_UpdateReindex(t *testing.T) {
 	// Update to Go-related content
 	newTitle := "Go语言教程"
 	newContent := "Go语言适合并发编程，由Google开发，性能优秀"
-	err = svc.Update(ctx, memory.UpdateRequest{
+	err = svc.Update(ctx, testScope(), memory.UpdateRequest{
 		ItemID:          id,
 		Title:           &newTitle,
 		Content:         &newContent,
@@ -206,8 +206,8 @@ func TestChineseSearch_UpdateReindex(t *testing.T) {
 	time.Sleep(50 * time.Millisecond)
 
 	// Search "Go" should now find the updated item
-	hits, err = svc.Recall(ctx, memory.RecallRequest{
-		Query:      "Go",
+	hits, err = svc.Recall(ctx, testScope(), memory.RecallRequest{
+		Query: "Go",
 	})
 	if err != nil {
 		t.Fatalf("Failed to recall: %v", err)
@@ -250,7 +250,7 @@ func TestChineseSearch_MixedCJKEnglish(t *testing.T) {
 	}
 
 	for _, item := range items {
-		_, err := svc.Remember(ctx, memory.RememberRequest{
+		_, err := svc.Remember(ctx, testScope(), memory.RememberRequest{
 			NamespaceType: memory.NamespaceKnowledge,
 			Title:         item.title,
 			Content:       item.content,
@@ -279,9 +279,9 @@ func TestChineseSearch_MixedCJKEnglish(t *testing.T) {
 	}
 
 	for _, tc := range testCases {
-		hits, err := svc.Recall(ctx, memory.RecallRequest{
-			Query:      tc.query,
-			TopK:       10,
+		hits, err := svc.Recall(ctx, testScope(), memory.RecallRequest{
+			Query: tc.query,
+			TopK:  10,
 		})
 		if err != nil {
 			t.Errorf("Failed to recall for '%s': %v", tc.query, err)
@@ -305,29 +305,29 @@ func TestChineseSearch_MultiWordMatch(t *testing.T) {
 
 	// Create memories with overlapping keywords
 	items := []struct {
-		title   string
-		content string
+		title      string
+		content    string
 		importance int
 	}{
 		{
-			title:   "北京上海高铁",
-			content: "北京到上海的高铁很快，只需要4个多小时。",
+			title:      "北京上海高铁",
+			content:    "北京到上海的高铁很快，只需要4个多小时。",
 			importance: 90,
 		},
 		{
-			title:   "北京广州航班",
-			content: "北京到广州的航班每天都有很多班次。",
+			title:      "北京广州航班",
+			content:    "北京到广州的航班每天都有很多班次。",
 			importance: 80,
 		},
 		{
-			title:   "上海深圳自驾",
-			content: "上海到深圳自驾游需要经过浙江福建。",
+			title:      "上海深圳自驾",
+			content:    "上海到深圳自驾游需要经过浙江福建。",
 			importance: 70,
 		},
 	}
 
 	for _, item := range items {
-		_, err := svc.Remember(ctx, memory.RememberRequest{
+		_, err := svc.Remember(ctx, testScope(), memory.RememberRequest{
 			NamespaceType: memory.NamespaceKnowledge,
 			Title:         item.title,
 			Content:       item.content,
@@ -340,9 +340,9 @@ func TestChineseSearch_MultiWordMatch(t *testing.T) {
 	}
 
 	// Search "北京" should return 2 items (北京上海、北京广州)
-	hits, err := svc.Recall(ctx, memory.RecallRequest{
-		Query:      "北京",
-		TopK:       10,
+	hits, err := svc.Recall(ctx, testScope(), memory.RecallRequest{
+		Query: "北京",
+		TopK:  10,
 	})
 	if err != nil {
 		t.Fatalf("Failed to recall: %v", err)
@@ -360,9 +360,9 @@ func TestChineseSearch_MultiWordMatch(t *testing.T) {
 	t.Logf("Search '北京' found %d hits, ranked by importance", len(hits))
 
 	// Search "上海" should return 2 items (北京上海、上海深圳)
-	hits, err = svc.Recall(ctx, memory.RecallRequest{
-		Query:      "上海",
-		TopK:       10,
+	hits, err = svc.Recall(ctx, testScope(), memory.RecallRequest{
+		Query: "上海",
+		TopK:  10,
 	})
 	if err != nil {
 		t.Fatalf("Failed to recall: %v", err)
@@ -398,7 +398,7 @@ func TestChineseSearch_LongContentTruncation(t *testing.T) {
 		strings.Repeat("中间有大量的引用内容和其他信息，可能包含一些不重要的文字。", 20) +
 		"结尾提到了烤鸭和美食推荐，这是最重要的部分。"
 
-	_, err := svc.Remember(ctx, memory.RememberRequest{
+	_, err := svc.Remember(ctx, testScope(), memory.RememberRequest{
 		NamespaceType: memory.NamespaceKnowledge,
 		Title:         "北京攻略",
 		Content:       longContent,
@@ -411,9 +411,9 @@ func TestChineseSearch_LongContentTruncation(t *testing.T) {
 
 	// Search for keywords that appear at the END of long content
 	// Should still be found because we keep tail 100 chars
-	hits, err := svc.Recall(ctx, memory.RecallRequest{
-		Query:      "烤鸭美食",
-		TopK:       2,
+	hits, err := svc.Recall(ctx, testScope(), memory.RecallRequest{
+		Query: "烤鸭美食",
+		TopK:  2,
 	})
 	if err != nil {
 		t.Fatalf("Failed to recall: %v", err)
@@ -426,9 +426,9 @@ func TestChineseSearch_LongContentTruncation(t *testing.T) {
 	t.Logf("Search '烤鸭美食' in long content found %d hit(s)", len(hits))
 
 	// Also verify beginning keywords are indexed
-	hits, err = svc.Recall(ctx, memory.RecallRequest{
-		Query:      "天安门故宫",
-		TopK:       2,
+	hits, err = svc.Recall(ctx, testScope(), memory.RecallRequest{
+		Query: "天安门故宫",
+		TopK:  2,
 	})
 	if err != nil {
 		t.Fatalf("Failed to recall: %v", err)
@@ -484,7 +484,7 @@ func TestChineseSearch_SentenceQuery(t *testing.T) {
 	}
 
 	for _, item := range items {
-		_, err := svc.Remember(ctx, memory.RememberRequest{
+		_, err := svc.Remember(ctx, testScope(), memory.RememberRequest{
 			NamespaceType: memory.NamespaceKnowledge,
 			Title:         item.title,
 			Content:       item.content,
@@ -501,9 +501,9 @@ func TestChineseSearch_SentenceQuery(t *testing.T) {
 	sentence := "我想去北京旅游吃美食"
 	t.Logf("Searching with sentence: '%s'", sentence)
 
-	hits, err := svc.Recall(ctx, memory.RecallRequest{
-		Query:      sentence,
-		TopK:       2, // Only return top 2
+	hits, err := svc.Recall(ctx, testScope(), memory.RecallRequest{
+		Query: sentence,
+		TopK:  2, // Only return top 2
 	})
 	if err != nil {
 		t.Fatalf("Failed to recall: %v", err)

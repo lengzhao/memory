@@ -45,6 +45,7 @@ type (
 
 	// LLM / extraction (DB 模型，常用者保留在根包)
 	ExtractionPrompt = model.ExtractionPrompt
+	LLMConfig        = model.LLMConfig
 
 	// Enum types
 	NamespaceType = model.NamespaceType
@@ -112,7 +113,7 @@ type (
 	MemoryService   = service.MemoryService
 	ServiceConfig   = service.Config
 	Stats           = service.Stats
-	IsolationMeta   = service.IsolationMeta
+	Scope           = service.Scope
 	RememberRequest = service.RememberRequest
 	RecallRequest   = service.RecallRequest
 	ListRequest     = service.ListRequest
@@ -176,6 +177,13 @@ var (
 	// NewJanitor runs the background maintenance loop (expiry + retention).
 	NewJanitor = service.NewJanitor
 
+	// Scope constructors. Isolation is an explicit argument to every operation, so a caller
+	// cannot forget to declare who it acts for.
+	NewScope           = service.NewScope
+	MustScope          = service.MustScope
+	GlobalScope        = service.GlobalScope
+	ScopeFromNamespace = service.ScopeFromNamespace
+
 	// QuickExtract is a convenience function for code-only extraction.
 	// Pass LLM config directly without DB setup.
 	QuickExtract = service.QuickExtract
@@ -195,16 +203,6 @@ var (
 	SetLogger = service.SetLogger
 	GetLogger = service.GetLogger
 
-	// Context-based isolation helpers.
-	//
-	// Operations fail closed: without WithIsolation (or AllowGlobal) they return
-	// CodeUnauthorized instead of touching the shared default namespaces, and an
-	// incomplete identity returns CodeValidation.
-	WithIsolation        = service.WithIsolation
-	AllowGlobal          = service.AllowGlobal
-	HasIsolation         = service.HasIsolation
-	IsolationFromContext = service.IsolationFromContext
-
 	// Audit helpers: attach actor/trace identifiers for memory_events
 	// (Config.RecordEvents enables the trail).
 	WithActor = service.WithActor
@@ -213,6 +211,11 @@ var (
 
 // Default limits used by the service when a request leaves them unset.
 const (
+	// ForgetSoft / ForgetExpire / ForgetHard are the ForgetRequest.Mode values.
+	ForgetSoft   = service.ForgetSoft
+	ForgetExpire = service.ForgetExpire
+	ForgetHard   = service.ForgetHard
+
 	// DefaultMinConfidence is applied when a recall/list request leaves MinConfidence unset
 	// (set SkipConfidenceFilter for "no filter").
 	DefaultMinConfidence = service.DefaultMinConfidence

@@ -26,7 +26,7 @@ import (
 
 func main() {
 	ctx := context.Background()
-	ctx = memory.WithIsolation(ctx, "demo-tenant", "demo-user", "extract-session", "extractor")
+	scope := memory.MustScope("demo-tenant", "demo-user", "extract-session", "extractor")
 
 	// 初始化数据库（DefaultConfig已启用AutoMigrate）
 	cfg := memory.DefaultConfig()
@@ -77,7 +77,7 @@ Agent: 已为您设置明天下午3点的会议提醒。`
 	}
 
 	fmt.Println("\n执行提取...")
-	result, err := extractor.Extract(ctx, req)
+	result, err := extractor.Extract(ctx, scope, req)
 	if err != nil {
 		log.Printf("提取失败（需要配置API密钥）: %v", err)
 		fmt.Println("\n提示: 配置API密钥后重新运行")

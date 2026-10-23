@@ -12,7 +12,7 @@ import (
 
 func main() {
 	ctx := context.Background()
-	ctx = memory.WithIsolation(ctx, "demo-tenant", "demo-user", "dedupe-session", "importer")
+	scope := memory.MustScope("demo-tenant", "demo-user", "dedupe-session", "importer")
 
 	// 初始化
 	cfg := memory.DefaultConfig()
@@ -33,7 +33,7 @@ func main() {
 
 	// 第一次导入
 	externalID := "user_12345_profile"
-	id1, err := svc.Remember(ctx, memory.RememberRequest{
+	id1, err := svc.Remember(ctx, scope, memory.RememberRequest{
 		NamespaceType: memory.NamespaceProfile,
 		Title:         "用户资料",
 		Content:       "用户张三，邮箱 zhangsan@example.com",
@@ -47,7 +47,7 @@ func main() {
 	fmt.Printf("   第一次导入: ID = %s\n", id1)
 
 	// 第二次导入（相同externalID）
-	id2, err := svc.Remember(ctx, memory.RememberRequest{
+	id2, err := svc.Remember(ctx, scope, memory.RememberRequest{
 		NamespaceType: memory.NamespaceProfile,
 		Title:         "用户资料（更新）", // 即使内容不同
 		Content:       "用户张三，邮箱 zhangsan@example.com，电话 13800138000",
@@ -80,7 +80,7 @@ func main() {
 	}
 
 	for _, u := range users {
-		id, err := svc.Remember(ctx, memory.RememberRequest{
+		id, err := svc.Remember(ctx, scope, memory.RememberRequest{
 			NamespaceType: memory.NamespaceProfile,
 			Title:         u.name,
 			Content:       u.content,
@@ -94,7 +94,7 @@ func main() {
 	}
 
 	// 统计
-	hits, _ := svc.Recall(ctx, memory.RecallRequest{
+	hits, _ := svc.Recall(ctx, scope, memory.RecallRequest{
 		NamespaceTypes: []memory.NamespaceType{memory.NamespaceProfile},
 	})
 	fmt.Printf("\n3. 最终导入用户数量: %d (预期3个：张三+李四+王五)\n", len(hits))

@@ -17,7 +17,7 @@ func TestDedupe_DedupeKey(t *testing.T) {
 	dedupeKey := "unique-dedupe-key-123"
 
 	// Create first item
-	id1, err := svc.Remember(ctx, memory.RememberRequest{
+	id1, err := svc.Remember(ctx, testScope(), memory.RememberRequest{
 		Content:   "First content",
 		DedupeKey: &dedupeKey,
 	})
@@ -26,7 +26,7 @@ func TestDedupe_DedupeKey(t *testing.T) {
 	}
 
 	// Create second item with same dedupe_key
-	id2, err := svc.Remember(ctx, memory.RememberRequest{
+	id2, err := svc.Remember(ctx, testScope(), memory.RememberRequest{
 		Content:   "Second content (should be deduped)",
 		DedupeKey: &dedupeKey,
 	})
@@ -40,8 +40,7 @@ func TestDedupe_DedupeKey(t *testing.T) {
 	}
 
 	// Should only have 1 item
-	hits, err := svc.Recall(ctx, memory.RecallRequest{
-	})
+	hits, err := svc.Recall(ctx, testScope(), memory.RecallRequest{})
 	if err != nil {
 		t.Fatalf("Failed to recall: %v", err)
 	}
@@ -59,7 +58,7 @@ func TestDedupe_NamespaceScope(t *testing.T) {
 	ctx := testContext()
 	dedupeKey := "shared-key-across-namespaces"
 
-	id1, err := svc.Remember(ctx, memory.RememberRequest{
+	id1, err := svc.Remember(ctx, testScope(), memory.RememberRequest{
 		NamespaceType: memory.NamespaceProfile,
 		Content:       "A",
 		DedupeKey:     &dedupeKey,
@@ -67,7 +66,7 @@ func TestDedupe_NamespaceScope(t *testing.T) {
 	if err != nil {
 		t.Fatalf("first remember: %v", err)
 	}
-	id2, err := svc.Remember(ctx, memory.RememberRequest{
+	id2, err := svc.Remember(ctx, testScope(), memory.RememberRequest{
 		NamespaceType: memory.NamespaceAction,
 		Content:       "B",
 		DedupeKey:     &dedupeKey,
@@ -90,7 +89,7 @@ func TestDedupe_EmptyDedupeKey(t *testing.T) {
 	ctx := testContext()
 
 	// Test with nil dedupe_key - should allow multiple items
-	id1, err := svc.Remember(ctx, memory.RememberRequest{
+	id1, err := svc.Remember(ctx, testScope(), memory.RememberRequest{
 		Content:   "First",
 		DedupeKey: nil, // nil should be ignored
 	})
@@ -98,7 +97,7 @@ func TestDedupe_EmptyDedupeKey(t *testing.T) {
 		t.Fatalf("Failed to remember first: %v", err)
 	}
 
-	id2, err := svc.Remember(ctx, memory.RememberRequest{
+	id2, err := svc.Remember(ctx, testScope(), memory.RememberRequest{
 		Content:   "Second",
 		DedupeKey: nil,
 	})

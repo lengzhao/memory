@@ -1,11 +1,12 @@
-// Package service provides memory decision engine for intelligent memory management.
+// Package service provides the memory decision engine: it lets an LLM pick between ADD, UPDATE,
+// DELETE, IGNORE and MERGE for freshly extracted candidates, then applies the decision through
+// MemoryService so that indexing, versioning and auditing stay consistent.
 package service
 
 import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"math"
 	"sort"
 	"strings"
 	"time"
@@ -15,36 +16,36 @@ import (
 	"github.com/lengzhao/memory/model"
 )
 
-// DecisionType represents the decision for a memory candidate
+// DecisionType is the action chosen for one candidate.
 type DecisionType string
 
 const (
-	DecisionAdd    DecisionType = "ADD"    // Add new memory
-	DecisionUpdate DecisionType = "UPDATE" // Update existing memory
-	DecisionDelete DecisionType = "DELETE" // Delete outdated memory
-	DecisionIgnore DecisionType = "IGNORE" // Ignore this candidate
-	DecisionMerge  DecisionType = "MERGE"  // Merge with existing memory
+	DecisionAdd    DecisionType = "ADD"
+	DecisionUpdate DecisionType = "UPDATE"
+	DecisionDelete DecisionType = "DELETE"
+	DecisionIgnore DecisionType = "IGNORE"
+	DecisionMerge  DecisionType = "MERGE"
 )
 
-// MemoryDecision represents the decision for a single memory candidate
+// MemoryDecision is the decision for a single candidate.
 type MemoryDecision struct {
 	Decision      DecisionType `json:"decision"`
-	TargetID      string       `json:"target_id,omitempty"` // Existing memory ID for UPDATE/DELETE/MERGE
+	TargetID      string       `json:"target_id,omitempty"`
 	Reason        string       `json:"reason"`
 	Confidence    float64      `json:"confidence"`
-	MergedContent string       `json:"merged_content,omitempty"` // For MERGE: merged content
-	MergedTitle   string       `json:"merged_title,omitempty"`   // For MERGE: merged title
-	NewImportance int          `json:"new_importance,omitempty"` // Suggested importance after action
+	MergedContent string       `json:"merged_content,omitempty"`
+	MergedTitle   string       `json:"merged_title,omitempty"`
+	NewImportance int          `json:"new_importance,omitempty"`
 }
 
-// DecisionRequest contains candidates and similar memories for decision making
+// DecisionRequest bundles the candidates with the existing memories they resemble.
 type DecisionRequest struct {
 	Candidates      []ExtractedMemory `json:"candidates"`
 	SimilarMemories []SimilarMemory   `json:"similar_memories"`
 	DialogContext   string            `json:"dialog_context"`
 }
 
-// SimilarMemory represents a potentially related existing memory
+// SimilarMemory is an existing memory that may cover the same topic as a candidate.
 type SimilarMemory struct {
 	ID         string   `json:"id"`
 	Namespace  string   `json:"namespace"`
@@ -55,169 +56,153 @@ type SimilarMemory struct {
 	Importance int      `json:"importance"`
 	Confidence float64  `json:"confidence"`
 	CreatedAt  string   `json:"created_at"`
-	Similarity float64  `json:"similarity"` // 0-1 similarity score
+	Similarity float64  `json:"similarity"`
 }
 
-// DecisionResult contains all decisions
+// DecisionResult is the model's answer plus its cost.
 type DecisionResult struct {
 	Decisions      []MemoryDecision `json:"decisions"`
 	TotalTokens    int              `json:"total_tokens"`
 	ProcessingTime int              `json:"processing_time_ms"`
 }
 
-// DecisionEngine handles intelligent memory decisions
+// ExecutionResult reports what was actually written.
+type ExecutionResult struct {
+	Added   []string
+	Updated []string
+	Deleted []string
+	Ignored []string
+	Merged  []string
+	Errors  []string
+}
+
+// DecisionEngine turns extraction candidates into memory writes.
+//
+// It is scope-aware: every lookup and every write is constrained to the scope it was called with,
+// and an ID proposed by the model is re-checked against the candidate's namespace type, so a
+// hallucinated or hostile target cannot reach outside the namespace it was classified into.
 type DecisionEngine struct {
 	db *gorm.DB
 }
 
-// NewDecisionEngine creates a new decision engine
+// NewDecisionEngine creates a decision engine.
 func NewDecisionEngine(db *gorm.DB) *DecisionEngine {
 	return &DecisionEngine{db: db}
 }
 
-// FindSimilarMemories finds existing memories similar to the candidate using FTS5 BM25.
-func (de *DecisionEngine) FindSimilarMemories(ctx context.Context, candidate ExtractedMemory, topK int) ([]SimilarMemory, error) {
+// FindSimilarMemories returns the existing memories most similar to a candidate, ordered by the
+// policy-weighted combination of BM25 relevance and tag overlap.
+func (de *DecisionEngine) FindSimilarMemories(ctx context.Context, scope Scope, candidate ExtractedMemory, topK int) ([]SimilarMemory, error) {
+	if err := scope.Validate(); err != nil {
+		return nil, err
+	}
+	nsType, err := normalizeNamespaceType(candidate.Namespace)
+	if err != nil {
+		return nil, err
+	}
 	if topK <= 0 {
 		topK = 5
 	}
 
-	// Build search query from candidate content
-	// Use title + content + tags for comprehensive matching
-	searchQuery := buildFTSQuery(candidate.Title, candidate.Content, candidate.Tags)
-	if searchQuery == "" {
+	query := buildFTSQuery(candidate.Title, candidate.Content, candidate.Tags)
+	if query == "" {
 		return nil, nil
 	}
 
-	// Candidate IDs are collected through the same FTS helper that Recall uses, so the
-	// relevance scale (BM25 -> similarity) stays consistent between recall and decision making.
-	tokenizedQuery := TokenizeQuery(searchQuery)
-	itemIDs, scores := de.searchCandidates(ctx, tokenizedQuery, topK*2)
-	if len(itemIDs) == 0 {
-		return nil, nil
-	}
-
-	query := de.db.WithContext(ctx).
-		Where("id IN ? AND status = ?", itemIDs, model.ItemStatusActive)
-	if HasIsolation(ctx) {
-		meta := IsolationFromContext(ctx)
-		query = query.Where("namespace IN ?", buildAllowedNamespaces(meta, namespaceTypeFilter(candidate.Namespace)))
-	}
-
-	var items []model.MemoryItem
-	if err := query.Find(&items).Error; err != nil {
-		return nil, err
-	}
-
-	weights, err := de.similarityWeightsForCandidate(ctx, candidate.Namespace)
-	if err != nil {
-		return nil, err
-	}
-
-	// Convert to SimilarMemory with combined similarity score
-	var similar []SimilarMemory
-	for _, item := range items {
-		ftsSim := scores[item.ID]
-
-		// Calculate tag overlap as additional signal
-		tagSim := calculateTagOverlap(candidate.Tags, parseTags(item.TagsJSON))
-
-		// Combined similarity: policy-driven weighted average.
-		finalSim := weights.FTSSimilarity*ftsSim + weights.TagOverlap*tagSim
-
-		if finalSim > 0.2 {
-			similar = append(similar, SimilarMemory{
-				ID:         item.ID,
-				Namespace:  item.Namespace,
-				Title:      item.Title,
-				Content:    item.Content,
-				Summary:    item.Summary,
-				Tags:       parseTags(item.TagsJSON),
-				Importance: item.Importance,
-				Confidence: item.Confidence,
-				CreatedAt:  item.CreatedAt.Format(time.RFC3339),
-				Similarity: finalSim,
-			})
-		}
-	}
-
-	// Sort by similarity descending
-	sort.Slice(similar, func(i, j int) bool {
-		return similar[i].Similarity > similar[j].Similarity
-	})
-
-	// Return topK
-	if len(similar) > topK {
-		similar = similar[:topK]
-	}
-
-	return similar, nil
-}
-
-// searchCandidates runs a BM25-ordered FTS5 query and maps each hit to a 0-1 similarity.
-func (de *DecisionEngine) searchCandidates(ctx context.Context, tokenizedQuery string, limit int) ([]string, map[string]float64) {
-	tokens := strings.Fields(tokenizedQuery)
+	tokens := strings.Fields(TokenizeQuery(query))
 	if len(tokens) == 0 {
 		return nil, nil
 	}
 
-	var orQuery strings.Builder
-	for _, token := range tokens {
-		token = strings.ReplaceAll(token, "\"", "")
-		if token == "" {
-			continue
-		}
-		if orQuery.Len() > 0 {
-			orQuery.WriteString(" OR ")
-		}
-		orQuery.WriteString("\"" + token + "\"")
-	}
-	if orQuery.Len() == 0 {
-		return nil, nil
-	}
-
-	var ftsResults []struct {
+	// Reuse the same relevance scale as Recall, so "similarity 0.8" means the same thing in both
+	// places and the decision prompt's thresholds stay meaningful.
+	var results []struct {
 		ItemID        string
 		TokenizedText string
-		BM25Score     float64
+		BM25          float64
 	}
-	err := de.db.WithContext(ctx).Raw(`
+	if err := de.db.WithContext(ctx).Raw(`
 		SELECT item_id,
 		       tokenized_content AS tokenized_text,
-		       bm25(fts_memory) AS bm25_score
+		       bm25(fts_memory) AS bm25
 		FROM fts_memory
-		WHERE fts_memory MATCH ?
-		ORDER BY bm25_score
+		WHERE tokenized_content MATCH ?
+		ORDER BY bm25
 		LIMIT ?
-	`, orQuery.String(), limit).Scan(&ftsResults).Error
-	if err != nil {
-		return nil, nil
+	`, ftsQuery(tokens), topK*2).Scan(&results).Error; err != nil {
+		return nil, wrapErr(CodeInternal, "similarity search failed", err)
 	}
 
-	itemIDs := make([]string, 0, len(ftsResults))
-	scores := make(map[string]float64, len(ftsResults))
-	for _, r := range ftsResults {
-		if !containsFullToken(r.TokenizedText, tokens) {
+	itemIDs := make([]string, 0, len(results))
+	bm25Scores := make(map[string]float64, len(results))
+	for _, r := range results {
+		if !containsWholeToken(r.TokenizedText, tokens) {
 			continue
 		}
 		itemIDs = append(itemIDs, r.ItemID)
-		scores[r.ItemID] = bm25ToSimilarity(r.BM25Score)
+		bm25Scores[r.ItemID] = r.BM25
 	}
-	return itemIDs, scores
+	if len(itemIDs) == 0 {
+		return nil, nil
+	}
+
+	var items []model.MemoryItem
+	if err := de.db.WithContext(ctx).
+		Where("id IN ? AND status = ?", itemIDs, model.ItemStatusActive).
+		Where("namespace = ?", scope.Namespace(nsType)).
+		Find(&items).Error; err != nil {
+		return nil, wrapErr(CodeInternal, "failed to load similar memories", err)
+	}
+
+	weights, err := de.similarityWeights(ctx, scope, nsType)
+	if err != nil {
+		return nil, err
+	}
+
+	similar := make([]SimilarMemory, 0, len(items))
+	for _, item := range items {
+		ftsSim := bm25ToSimilarity(bm25Scores[item.ID])
+		tagSim := calculateTagOverlap(candidate.Tags, parseTags(item.TagsJSON))
+		finalSim := weights.FTSSimilarity*ftsSim + weights.TagOverlap*tagSim
+		if finalSim <= similarityThreshold {
+			continue
+		}
+		similar = append(similar, SimilarMemory{
+			ID:         item.ID,
+			Namespace:  item.Namespace,
+			Title:      item.Title,
+			Content:    item.Content,
+			Summary:    item.Summary,
+			Tags:       parseTags(item.TagsJSON),
+			Importance: item.Importance,
+			Confidence: item.Confidence,
+			CreatedAt:  item.CreatedAt.Format(time.RFC3339),
+			Similarity: finalSim,
+		})
+	}
+
+	sort.Slice(similar, func(i, j int) bool {
+		if similar[i].Similarity != similar[j].Similarity {
+			return similar[i].Similarity > similar[j].Similarity
+		}
+		return similar[i].ID < similar[j].ID
+	})
+	if len(similar) > topK {
+		similar = similar[:topK]
+	}
+	return similar, nil
 }
+
+// similarityThreshold keeps obviously unrelated rows out of the decision prompt.
+const similarityThreshold = 0.2
 
 type decisionSimilarityWeights struct {
 	FTSSimilarity float64
 	TagOverlap    float64
 }
 
-func (de *DecisionEngine) similarityWeightsForCandidate(ctx context.Context, nsType model.NamespaceType) (decisionSimilarityWeights, error) {
-	namespace := buildDefaultNamespace(nsType)
-	if isIsolationEnabled(ctx) {
-		namespace = buildNamespace(IsolationFromContext(ctx), nsType)
-	}
-
-	pm := NewPolicyManager(de.db)
-	policy, err := pm.GetPolicy(ctx, namespace)
+func (de *DecisionEngine) similarityWeights(ctx context.Context, scope Scope, nsType model.NamespaceType) (decisionSimilarityWeights, error) {
+	policy, err := NewPolicyManager(de.db).GetPolicy(ctx, scope.Namespace(nsType))
 	if err != nil {
 		return decisionSimilarityWeights{}, err
 	}
@@ -225,11 +210,7 @@ func (de *DecisionEngine) similarityWeightsForCandidate(ctx context.Context, nsT
 }
 
 func parseDecisionSimilarityWeights(rankWeightsJSON string) decisionSimilarityWeights {
-	// Backward-compatible defaults used before policy-driven behavior.
-	weights := decisionSimilarityWeights{
-		FTSSimilarity: 0.7,
-		TagOverlap:    0.3,
-	}
+	weights := decisionSimilarityWeights{FTSSimilarity: 0.7, TagOverlap: 0.3}
 	if strings.TrimSpace(rankWeightsJSON) == "" {
 		return weights
 	}
@@ -252,160 +233,92 @@ func parseDecisionSimilarityWeights(rankWeightsJSON string) decisionSimilarityWe
 	return weights
 }
 
-// buildFTSQuery constructs a FTS5 search query from memory components
-// Handles both English and Chinese text
+// buildFTSQuery assembles the search text for a candidate: title, the head of the content, and tags.
 func buildFTSQuery(title, content string, tags []string) string {
-	var parts []string
-
-	// Add title (higher weight, so include twice)
-	if title != "" {
-		cleanTitle := sanitizeFTSQuery(title)
-		if cleanTitle != "" {
-			parts = append(parts, cleanTitle)
-		}
+	parts := make([]string, 0, 3)
+	if clean := sanitizeFTSQuery(title); clean != "" {
+		parts = append(parts, clean)
 	}
-
-	// Add content (extract first 200 runes to avoid query bloat)
-	// Use runes to handle multi-byte characters (Chinese, emoji, etc.)
 	if content != "" {
 		runes := []rune(content)
 		if len(runes) > 200 {
 			content = string(runes[:200])
 		}
-		cleanContent := sanitizeFTSQuery(content)
-		if cleanContent != "" {
-			parts = append(parts, cleanContent)
+		if clean := sanitizeFTSQuery(content); clean != "" {
+			parts = append(parts, clean)
 		}
 	}
-
-	// Add tags with OR operator
 	if len(tags) > 0 {
-		var tagParts []string
+		tagParts := make([]string, 0, len(tags))
 		for _, tag := range tags {
-			if tag != "" {
-				tagParts = append(tagParts, sanitizeFTSQuery(tag))
+			if clean := sanitizeFTSQuery(tag); clean != "" {
+				tagParts = append(tagParts, clean)
 			}
 		}
 		if len(tagParts) > 0 {
-			parts = append(parts, strings.Join(tagParts, " OR "))
+			parts = append(parts, strings.Join(tagParts, " "))
 		}
 	}
-
 	return strings.Join(parts, " ")
 }
 
-// sanitizeFTSQuery cleans text for FTS5 query
-// Removes FTS5 special characters that would cause syntax errors
+// sanitizeFTSQuery strips characters that would change the meaning of an FTS query.
 func sanitizeFTSQuery(text string) string {
-	// FTS5 special characters: " * ( ) - ~
-	// Replace with space
-	replacer := strings.NewReplacer(
-		"\"", " ",
-		"*", " ",
-		"(", " ",
-		")", " ",
-		"-", " ",
-		"~", " ",
-		"\n", " ",
-		"\t", " ",
-	)
-
-	cleaned := replacer.Replace(text)
-
-	// Collapse multiple spaces
-	for strings.Contains(cleaned, "  ") {
-		cleaned = strings.ReplaceAll(cleaned, "  ", " ")
-	}
-
-	return strings.TrimSpace(cleaned)
+	cleaned := strings.NewReplacer(
+		`"`, " ", "*", " ", "(", " ", ")", " ", "-", " ", "~", " ",
+		"\n", " ", "\t", " ",
+	).Replace(text)
+	return strings.Join(strings.Fields(cleaned), " ")
 }
 
-// bm25ToSimilarity converts BM25 score to 0-1 similarity
-// BM25: lower is better, 0 = perfect match
-// Typical range: 0-10 for reasonable matches
-func bm25ToSimilarity(bm25 float64) float64 {
-	if bm25 <= 0 {
-		return 1.0 // Perfect match
-	}
-	// Exponential decay: sim = exp(-bm25/3)
-	// At bm25=0: sim=1, bm25=3: sim=0.37, bm25=6: sim=0.14
-	sim := math.Exp(-bm25 / 3.0)
-	if sim < 0 {
-		return 0
-	}
-	if sim > 1 {
-		return 1
-	}
-	return sim
-}
-
-// Decide uses LLM to make decisions for each candidate
+// Decide asks the model which action to take for each candidate.
 func (de *DecisionEngine) Decide(ctx context.Context, llmConfig model.LLMConfig, req DecisionRequest) (*DecisionResult, error) {
 	start := time.Now()
-
-	// Build the decision prompt
-	prompt := de.buildDecisionPrompt(req)
-
-	// Call LLM
-	decisions, tokens, err := de.callDecisionLLM(ctx, llmConfig, prompt)
+	decisions, tokens, err := de.callDecisionLLM(ctx, llmConfig, de.buildDecisionPrompt(req))
 	if err != nil {
-		return nil, fmt.Errorf("LLM decision failed: %w", err)
+		return nil, err
 	}
-
-	processingTime := int(time.Since(start).Milliseconds())
-
 	return &DecisionResult{
 		Decisions:      decisions,
 		TotalTokens:    tokens,
-		ProcessingTime: processingTime,
+		ProcessingTime: int(time.Since(start).Milliseconds()),
 	}, nil
 }
 
-// buildDecisionPrompt creates the prompt for LLM decision making
 func (de *DecisionEngine) buildDecisionPrompt(req DecisionRequest) string {
-	prompt := `You are a memory management AI. Analyze the new memory candidates and existing similar memories to make optimal decisions.
+	var prompt strings.Builder
+	prompt.WriteString(`You are a memory management AI. Choose the best action for each new candidate.
 
-DECISION RULES:
-1. ADD: Create new memory if no similar existing memory covers the same topic
-2. UPDATE: Replace existing memory if new info is more accurate/complete
-3. DELETE: Mark existing as outdated if new info contradicts it
-4. IGNORE: Skip if candidate is duplicate or irrelevant
-5. MERGE: Combine with existing memory if they share the same topic (preserve all unique facts)
+ACTIONS:
+1. ADD: no existing memory covers this topic
+2. UPDATE: an existing memory is out of date and the candidate replaces it
+3. DELETE: the candidate contradicts an existing memory that should not survive
+4. IGNORE: the candidate is a duplicate or adds nothing
+5. MERGE: the candidate and an existing memory share a topic but each holds unique facts
 
-DECISION CRITERIA:
-- Similarity > 0.8: Consider UPDATE, DELETE, or MERGE
-- Same topic but different facts: MERGE
-- Contradictory facts: DELETE old, ADD new OR UPDATE
-- Duplicate: IGNORE
-- Importance should be recalculated after merge/update
+CRITERIA:
+- Similarity > 0.8: prefer UPDATE, MERGE or DELETE over ADD
+- Same topic, different facts: MERGE and preserve every unique fact
+- Contradictory facts: DELETE the superseded memory (or UPDATE it)
+- Pure duplicate: IGNORE
 
-`
+`)
 
-	// Add candidates
-	prompt += "NEW CANDIDATES:\n"
+	prompt.WriteString("NEW CANDIDATES:\n")
 	for i, c := range req.Candidates {
-		prompt += fmt.Sprintf("\n[CANDIDATE %d]\n", i)
-		prompt += fmt.Sprintf("TempID: %s\n", c.TempID)
-		prompt += fmt.Sprintf("Namespace: %s\n", c.Namespace)
-		prompt += fmt.Sprintf("Title: %s\n", c.Title)
-		prompt += fmt.Sprintf("Content: %s\n", c.Content)
-		prompt += fmt.Sprintf("Tags: %v\n", c.Tags)
-		prompt += fmt.Sprintf("Importance: %d, Confidence: %.2f\n", c.Importance, c.Confidence)
+		fmt.Fprintf(&prompt, "\n[CANDIDATE %d]\nTempID: %s\nNamespace: %s\nTitle: %s\nContent: %s\nTags: %v\nImportance: %d, Confidence: %.2f\n",
+			i, c.TempID, c.Namespace, c.Title, c.Content, c.Tags, c.Importance, c.Confidence)
 	}
 
-	// Add similar memories
-	prompt += "\n\nEXISTING SIMILAR MEMORIES:\n"
+	prompt.WriteString("\n\nEXISTING SIMILAR MEMORIES:\n")
 	for i, s := range req.SimilarMemories {
-		prompt += fmt.Sprintf("\n[MEMORY %d]\n", i)
-		prompt += fmt.Sprintf("ID: %s\n", s.ID)
-		prompt += fmt.Sprintf("Namespace: %s\n", s.Namespace)
-		prompt += fmt.Sprintf("Title: %s\n", s.Title)
-		prompt += fmt.Sprintf("Content: %s\n", s.Content)
-		prompt += fmt.Sprintf("Tags: %v\n", s.Tags)
-		prompt += fmt.Sprintf("Importance: %d, Similarity: %.2f\n", s.Importance, s.Similarity)
+		fmt.Fprintf(&prompt, "\n[MEMORY %d]\nID: %s\nNamespace: %s\nTitle: %s\nContent: %s\nTags: %v\nImportance: %d, Similarity: %.2f\n",
+			i, s.ID, s.Namespace, s.Title, s.Content, s.Tags, s.Importance, s.Similarity)
 	}
 
-	prompt += `\n\nReturn your decisions as JSON:
+	prompt.WriteString(`
+
+Return JSON:
 {
   "decisions": [
     {
@@ -420,135 +333,89 @@ DECISION CRITERIA:
   ]
 }
 
-One decision per candidate, in the same order as candidates provided.`
-
-	return prompt
+Exactly one decision per candidate, in the order the candidates were given.`)
+	return prompt.String()
 }
 
-// callDecisionLLM calls LLM for decision making
 func (de *DecisionEngine) callDecisionLLM(ctx context.Context, cfg model.LLMConfig, prompt string) ([]MemoryDecision, int, error) {
 	messages := []openAIMessage{
-		{Role: "system", Content: "You are a precise memory management AI. Make decisions based on semantic similarity and factual overlap."},
+		{Role: "system", Content: "You are a precise memory management AI. Decide based on semantic similarity and factual overlap."},
 		{Role: "user", Content: prompt},
 	}
-
-	apiResp, err := callLLM(ctx, cfg, messages, 0.2)
+	apiResp, err := callLLM(ctx, cfg, messages, decisionTemperature)
 	if err != nil {
 		return nil, 0, err
 	}
 
-	content := apiResp.Choices[0].Message.Content
-
 	var result struct {
 		Decisions []MemoryDecision `json:"decisions"`
 	}
-	if err := json.Unmarshal([]byte(content), &result); err != nil {
+	if err := json.Unmarshal([]byte(apiResp.Choices[0].Message.Content), &result); err != nil {
 		return nil, apiResp.Usage.TotalTokens, fmt.Errorf("failed to parse decisions: %w", err)
 	}
-
 	return result.Decisions, apiResp.Usage.TotalTokens, nil
 }
 
-// ExecuteDecisions executes the decisions and returns the results.
-//
-// Decisions that point at an existing memory are applied through MemoryService, so they keep
-// the same invariants as the normal write path: re-tokenization for the search index, optimistic
-// version bumps, callbacks and audit events. Previously this path updated rows directly and
-// silently left the FTS index pointing at the previous content.
-//
-// DELETE is honoured in soft form only: an LLM-proposed destructive action performs reversible
-// removal (status=deleted), never erasure.
-func (de *DecisionEngine) ExecuteDecisions(ctx context.Context, candidates []ExtractedMemory, decisions []MemoryDecision) (*ExecutionResult, error) {
-	result := &ExecutionResult{
-		Added:   []string{},
-		Updated: []string{},
-		Deleted: []string{},
-		Ignored: []string{},
-		Merged:  []string{},
-	}
+// decisionTemperature keeps the model close to the prompt; deciding is classification, not writing.
+const decisionTemperature = 0.2
 
+// ExecuteDecisions applies the decisions through MemoryService.
+//
+// Unrecognised or unusable decisions are reported as errors and skipped: defaulting them to ADD
+// would quietly turn a parsing problem into duplicate memories.
+func (de *DecisionEngine) ExecuteDecisions(ctx context.Context, scope Scope, candidates []ExtractedMemory, decisions []MemoryDecision) (*ExecutionResult, error) {
+	if err := scope.Validate(); err != nil {
+		return nil, err
+	}
 	if len(decisions) != len(candidates) {
 		return nil, fmt.Errorf("decision count (%d) doesn't match candidate count (%d)", len(decisions), len(candidates))
 	}
 
+	svc := NewMemoryService(de.db)
+	result := &ExecutionResult{Added: []string{}, Updated: []string{}, Deleted: []string{}, Ignored: []string{}, Merged: []string{}}
+
 	for i, decision := range decisions {
 		candidate := candidates[i]
-
+		var (
+			id  string
+			err error
+		)
 		switch decision.Decision {
 		case DecisionAdd:
-			id, err := de.executeAdd(ctx, candidate)
-			if err != nil {
-				result.Errors = append(result.Errors, fmt.Sprintf("ADD failed for %s: %v", candidate.TempID, err))
-			} else {
+			id, err = de.applyAdd(ctx, svc, scope, candidate)
+			if err == nil {
 				result.Added = append(result.Added, id)
 			}
-
 		case DecisionUpdate:
-			if decision.TargetID == "" {
-				result.Errors = append(result.Errors, fmt.Sprintf("UPDATE missing target_id for %s", candidate.TempID))
-				continue
-			}
-			id, err := de.executeUpdate(ctx, decision.TargetID, candidate, decision)
-			if err != nil {
-				result.Errors = append(result.Errors, fmt.Sprintf("UPDATE failed for %s: %v", candidate.TempID, err))
-			} else {
+			id, err = de.applyUpdate(ctx, svc, scope, decision, candidate)
+			if err == nil {
 				result.Updated = append(result.Updated, id)
 			}
-
 		case DecisionDelete:
-			if decision.TargetID == "" {
-				result.Errors = append(result.Errors, fmt.Sprintf("DELETE missing target_id for %s", candidate.TempID))
-				continue
-			}
-			id, err := de.executeDelete(ctx, decision.TargetID, candidate, decision)
-			if err != nil {
-				result.Errors = append(result.Errors, fmt.Sprintf("DELETE failed for %s: %v", candidate.TempID, err))
-			} else {
+			id, err = de.applyDelete(ctx, svc, scope, decision, candidate)
+			if err == nil {
 				result.Deleted = append(result.Deleted, id)
 			}
-
 		case DecisionMerge:
-			if decision.TargetID == "" {
-				result.Errors = append(result.Errors, fmt.Sprintf("MERGE missing target_id for %s", candidate.TempID))
-				continue
-			}
-			id, err := de.executeMerge(ctx, decision.TargetID, candidate, decision)
-			if err != nil {
-				result.Errors = append(result.Errors, fmt.Sprintf("MERGE failed for %s: %v", candidate.TempID, err))
-			} else {
+			id, err = de.applyMerge(ctx, svc, scope, decision, candidate)
+			if err == nil {
 				result.Merged = append(result.Merged, id)
 			}
-
 		case DecisionIgnore:
 			result.Ignored = append(result.Ignored, candidate.TempID)
-
+			continue
 		default:
-			// Default to ADD if decision unclear
-			id, err := de.executeAdd(ctx, candidate)
-			if err != nil {
-				result.Errors = append(result.Errors, fmt.Sprintf("default ADD failed for %s: %v", candidate.TempID, err))
-			} else {
-				result.Added = append(result.Added, id)
-			}
+			err = fmt.Errorf("unknown decision %q", decision.Decision)
+		}
+		if err != nil {
+			result.Errors = append(result.Errors, fmt.Sprintf("%s failed for %s: %v", decision.Decision, candidate.TempID, err))
 		}
 	}
-
 	return result, nil
 }
 
-// ExecutionResult contains the results of decision execution
-type ExecutionResult struct {
-	Added   []string
-	Updated []string
-	Deleted []string
-	Ignored []string
-	Merged  []string
-	Errors  []string
-}
-
-func (de *DecisionEngine) executeAdd(ctx context.Context, candidate ExtractedMemory) (string, error) {
-	svc := NewMemoryService(de.db)
-	return svc.Remember(ctx, RememberRequest{
+func (de *DecisionEngine) applyAdd(ctx context.Context, svc *MemoryService, scope Scope, candidate ExtractedMemory) (string, error) {
+	return svc.Remember(ctx, scope, RememberRequest{
 		NamespaceType: candidate.Namespace,
 		Title:         candidate.Title,
 		Content:       candidate.Content,
@@ -560,25 +427,24 @@ func (de *DecisionEngine) executeAdd(ctx context.Context, candidate ExtractedMem
 	})
 }
 
-// executeUpdate rewrites an existing memory through MemoryService so the version bump,
-// re-tokenization, callbacks and audit events all match the regular write path.
-func (de *DecisionEngine) executeUpdate(ctx context.Context, targetID string, candidate ExtractedMemory, decision MemoryDecision) (string, error) {
-	memory, err := de.loadTarget(ctx, targetID, candidate)
+func (de *DecisionEngine) applyUpdate(ctx context.Context, svc *MemoryService, scope Scope, decision MemoryDecision, candidate ExtractedMemory) (string, error) {
+	if decision.TargetID == "" {
+		return "", fmt.Errorf("target_id is required")
+	}
+	target, err := de.loadTarget(ctx, scope, decision.TargetID, candidate)
 	if err != nil {
 		return "", err
 	}
 
-	req := UpdateRequest{ItemID: memory.ID, ExpectedVersion: memory.Version}
-	title := candidate.Title
-	content := candidate.Content
-	if strings.TrimSpace(title) != "" {
+	req := UpdateRequest{ItemID: target.ID, ExpectedVersion: target.Version}
+	if title := strings.TrimSpace(candidate.Title); title != "" {
 		req.Title = &title
 	}
-	if strings.TrimSpace(content) != "" {
+	if content := strings.TrimSpace(candidate.Content); content != "" {
 		req.Content = &content
 	}
-	if strings.TrimSpace(candidate.Summary) != "" {
-		req.Summary = &candidate.Summary
+	if summary := strings.TrimSpace(candidate.Summary); summary != "" {
+		req.Summary = &summary
 	}
 	if len(candidate.Tags) > 0 {
 		req.Tags = candidate.Tags
@@ -586,199 +452,169 @@ func (de *DecisionEngine) executeUpdate(ctx context.Context, targetID string, ca
 	if decision.NewImportance > 0 {
 		req.Importance = &decision.NewImportance
 	}
-
-	// The target was already scoped by loadTarget; re-derive an isolation context from its
-	// namespace so the service can enforce the same boundary when the caller passed none.
-	svcCtx := deriveIsolationContext(ctx, memory.Namespace)
-	if err := NewMemoryService(de.db).Update(svcCtx, req); err != nil {
+	if err := svc.Update(ctx, scope, req); err != nil {
 		return "", err
 	}
-	return memory.ID, nil
+	return target.ID, nil
 }
 
-// executeDelete soft-deletes the target (reversible), through Forget so the FTS index is
-// pruned and the deletion is audited.
-func (de *DecisionEngine) executeDelete(ctx context.Context, targetID string, candidate ExtractedMemory, decision MemoryDecision) (string, error) {
-	memory, err := de.loadTarget(ctx, targetID, candidate)
+func (de *DecisionEngine) applyDelete(ctx context.Context, svc *MemoryService, scope Scope, decision MemoryDecision, candidate ExtractedMemory) (string, error) {
+	if decision.TargetID == "" {
+		return "", fmt.Errorf("target_id is required")
+	}
+	target, err := de.loadTarget(ctx, scope, decision.TargetID, candidate)
 	if err != nil {
 		return "", err
 	}
-	svcCtx := deriveIsolationContext(ctx, memory.Namespace)
-	if _, err := NewMemoryService(de.db).Forget(svcCtx, ForgetRequest{
-		ItemIDs: []string{memory.ID},
-		Mode:    "soft",
-		Reason:  decision.Reason,
+	// Deletion proposed by a model is always reversible: ForgetSoft keeps the row (and its audit
+	// trail) recoverable, whereas a hard delete would make a bad decision unrecoverable.
+	if _, err := svc.Forget(ctx, scope, ForgetRequest{
+		ItemIDs:       []string{target.ID},
+		NamespaceType: target.NamespaceType,
+		Mode:          ForgetSoft,
+		Reason:        decision.Reason,
 	}); err != nil {
 		return "", err
 	}
-	return memory.ID, nil
+	return target.ID, nil
 }
 
-// loadTarget resolves and scopes an existing memory before mutating it. The candidate's
-// namespace type is authoritative: destructive decisions from the model cannot reach outside
-// the namespace the candidate was classified into.
-func (de *DecisionEngine) loadTarget(ctx context.Context, targetID string, candidate ExtractedMemory) (model.MemoryItem, error) {
-	query, err := de.scopedTargetQuery(ctx, targetID, candidate.Namespace)
-	if err != nil {
-		return model.MemoryItem{}, err
+func (de *DecisionEngine) applyMerge(ctx context.Context, svc *MemoryService, scope Scope, decision MemoryDecision, candidate ExtractedMemory) (string, error) {
+	if decision.TargetID == "" {
+		return "", fmt.Errorf("target_id is required")
 	}
-	var memory model.MemoryItem
-	if err := query.First(&memory).Error; err != nil {
-		return model.MemoryItem{}, fmt.Errorf("target memory not found: %s: %w", targetID, err)
-	}
-	return memory, nil
-}
-
-func (de *DecisionEngine) executeMerge(ctx context.Context, targetID string, candidate ExtractedMemory, decision MemoryDecision) (string, error) {
-	existing, err := de.loadTarget(ctx, targetID, candidate)
+	target, err := de.loadTarget(ctx, scope, decision.TargetID, candidate)
 	if err != nil {
 		return "", err
 	}
 
-	// Determine merged content
-	mergedTitle := decision.MergedTitle
-	mergedContent := decision.MergedContent
-
+	mergedTitle := strings.TrimSpace(decision.MergedTitle)
 	if mergedTitle == "" {
-		mergedTitle = existing.Title
+		mergedTitle = target.Title
 		if len(candidate.Title) > len(mergedTitle) {
 			mergedTitle = candidate.Title
 		}
 	}
-
+	mergedContent := strings.TrimSpace(decision.MergedContent)
 	if mergedContent == "" {
-		// Simple merge: combine unique information
-		mergedContent = de.mergeContent(existing.Content, candidate.Content)
+		mergedContent = mergeContent(target.Content, candidate.Content)
 	}
+	mergedTags := mergeTags(parseTags(target.TagsJSON), candidate.Tags)
 
-	// Merge tags
-	mergedTags := mergeTags(parseTags(existing.TagsJSON), candidate.Tags)
-
-	// Calculate new importance (take max or weighted average)
-	newImportance := existing.Importance
+	newImportance := target.Importance
 	if decision.NewImportance > 0 {
 		newImportance = decision.NewImportance
-	} else if candidate.Importance > existing.Importance {
+	} else if candidate.Importance > target.Importance {
 		newImportance = candidate.Importance
 	}
+	mergedConfidence := (target.Confidence + candidate.Confidence) / 2
 
-	mergedConfidence := (existing.Confidence + candidate.Confidence) / 2
-
-	// Write through MemoryService: re-tokenization, version bump, callbacks, audit.
-	svcCtx := deriveIsolationContext(ctx, existing.Namespace)
 	req := UpdateRequest{
-		ItemID:          existing.ID,
+		ItemID:          target.ID,
 		Title:           &mergedTitle,
 		Content:         &mergedContent,
 		Tags:            mergedTags,
 		Importance:      &newImportance,
 		Confidence:      &mergedConfidence,
-		ExpectedVersion: existing.Version,
+		ExpectedVersion: target.Version,
 	}
-	if candidate.Summary != "" {
-		req.Summary = &candidate.Summary
+	if summary := strings.TrimSpace(candidate.Summary); summary != "" {
+		req.Summary = &summary
 	}
-	if err := NewMemoryService(de.db).Update(svcCtx, req); err != nil {
+	if err := svc.Update(ctx, scope, req); err != nil {
 		return "", err
 	}
 
-	// Create merge record for tracking
-	mergeRecord := model.MemoryMerge{
-		ID:             model.GenerateID(),
-		TargetID:       existing.ID,
-		SourceContent:  candidate.Content,
-		SourceTitle:    candidate.Title,
-		MergedContent:  mergedContent,
-		MergedTitle:    mergedTitle,
-		SourceDialogID: "", // Will be set by caller if available
-		CreatedAt:      time.Now(),
+	record := model.MemoryMerge{
+		ID:            model.GenerateID(),
+		TargetID:      target.ID,
+		SourceContent: candidate.Content,
+		SourceTitle:   candidate.Title,
+		MergedContent: mergedContent,
+		MergedTitle:   mergedTitle,
+		Reason:        decision.Reason,
+		MergeType:     "auto",
+		CreatedAt:     time.Now(),
 	}
-	if err := de.db.WithContext(ctx).Create(&mergeRecord).Error; err != nil {
-		GetLogger().Warn("failed to record memory merge", "error", err, "target_id", existing.ID)
+	if err := de.db.WithContext(ctx).Create(&record).Error; err != nil {
+		GetLogger().Warn("failed to record memory merge", "error", err, "target_id", target.ID)
 	}
-
-	return existing.ID, nil
+	return target.ID, nil
 }
 
-func (de *DecisionEngine) scopedTargetQuery(ctx context.Context, targetID string, nsType model.NamespaceType) (*gorm.DB, error) {
-	query := de.db.WithContext(ctx).
-		Model(&model.MemoryItem{}).
-		Where("id = ?", targetID)
-	if nsType != "" {
-		query = query.Where("namespace_type = ?", nsType)
+// loadTarget resolves a memory the model referred to, constrained to the scope and to the
+// namespace type the candidate was classified into.
+func (de *DecisionEngine) loadTarget(ctx context.Context, scope Scope, targetID string, candidate ExtractedMemory) (model.MemoryItem, error) {
+	nsType, err := normalizeNamespaceType(candidate.Namespace)
+	if err != nil {
+		return model.MemoryItem{}, err
 	}
-	if HasIsolation(ctx) {
-		query = query.Where("namespace IN ?", buildAllowedNamespaces(IsolationFromContext(ctx), namespaceTypeFilter(nsType)))
+	var target model.MemoryItem
+	if err := de.db.WithContext(ctx).
+		Where("id = ?", targetID).
+		Where("namespace = ?", scope.Namespace(nsType)).
+		First(&target).Error; err != nil {
+		return model.MemoryItem{}, fmt.Errorf("target memory %s not found in this scope and namespace: %w", targetID, err)
 	}
-	return query, nil
+	return target, nil
 }
 
-// mergeContent intelligently merges two content strings
-func (de *DecisionEngine) mergeContent(existing, new string) string {
-	if existing == new {
+// mergeContent combines two versions of a topic, preferring the richer text and otherwise
+// appending the new facts under an explicit marker so nothing is silently lost.
+func mergeContent(existing, incoming string) string {
+	if existing == incoming {
 		return existing
 	}
-
-	// If one contains the other, use the longer one
-	if strings.Contains(existing, new) {
+	if strings.Contains(existing, incoming) {
 		return existing
 	}
-	if strings.Contains(new, existing) {
-		return new
+	if strings.Contains(incoming, existing) {
+		return incoming
 	}
-
-	// Simple concatenation with separator
-	// In production, this could use LLM to intelligently merge
-	return existing + "\n\n[Additional Info]\n" + new
+	if strings.TrimSpace(existing) == "" {
+		return incoming
+	}
+	if strings.TrimSpace(incoming) == "" {
+		return existing
+	}
+	return existing + "\n\n[Additional Info]\n" + incoming
 }
 
-// Helper functions
-
-func calculateTagOverlap(tags1, tags2 []string) float64 {
-	if len(tags1) == 0 || len(tags2) == 0 {
+func calculateTagOverlap(a, b []string) float64 {
+	if len(a) == 0 || len(b) == 0 {
 		return 0
 	}
-
-	set1 := make(map[string]bool)
-	for _, t := range tags1 {
-		set1[strings.ToLower(t)] = true
+	set := make(map[string]bool, len(a))
+	for _, t := range a {
+		set[strings.ToLower(t)] = true
 	}
-
 	overlap := 0
-	for _, t := range tags2 {
-		if set1[strings.ToLower(t)] {
+	for _, t := range b {
+		if set[strings.ToLower(t)] {
 			overlap++
 		}
 	}
-
-	return float64(overlap) / float64(len(tags1)+len(tags2)-overlap)
+	return float64(overlap) / float64(len(a)+len(b)-overlap)
 }
 
 func parseTags(jsonStr string) []string {
 	var tags []string
-	json.Unmarshal([]byte(jsonStr), &tags)
+	_ = json.Unmarshal([]byte(jsonStr), &tags)
 	return tags
 }
 
-func mergeTags(tags1, tags2 []string) []string {
-	seen := make(map[string]bool)
-	merged := []string{}
-
-	for _, t := range tags1 {
-		lower := strings.ToLower(t)
-		if !seen[lower] {
+func mergeTags(a, b []string) []string {
+	seen := make(map[string]bool, len(a)+len(b))
+	merged := make([]string, 0, len(a)+len(b))
+	for _, group := range [][]string{a, b} {
+		for _, t := range group {
+			lower := strings.ToLower(t)
+			if seen[lower] {
+				continue
+			}
 			seen[lower] = true
 			merged = append(merged, t)
 		}
 	}
-
-	for _, t := range tags2 {
-		lower := strings.ToLower(t)
-		if !seen[lower] {
-			seen[lower] = true
-			merged = append(merged, t)
-		}
-	}
-
 	return merged
 }

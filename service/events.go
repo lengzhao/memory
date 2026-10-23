@@ -8,28 +8,25 @@ import (
 	"github.com/lengzhao/memory/model"
 )
 
-type ctxKeyActor ctxKey
-type ctxKeyTrace ctxKey
+type ctxKey string
 
 const (
-	ctxKeyActorID   = ctxKeyActor("actor_id")
-	ctxKeyTraceID   = ctxKeyTrace("trace_id")
-	ctxKeyRequestID = ctxKeyTrace("request_id")
-	// ctxKeyTagsAnyEsc is unused; kept out of the public surface.
+	ctxKeyActorID   ctxKey = "actor_id"
+	ctxKeyTraceID   ctxKey = "trace_id"
+	ctxKeyRequestID ctxKey = "request_id"
 )
 
-// WithActor records who is performing the operation (user id, agent id, "system").
-// It is written to memory_events when Config.RecordEvents is enabled.
+// WithActor records who performs an operation (user id, agent id, "system"). The value is written
+// to memory_events when Config.RecordEvents is enabled. Audit metadata is the only thing carried
+// in the context: isolation is an explicit argument everywhere.
 func WithActor(ctx context.Context, actor string) context.Context {
 	return context.WithValue(ctx, ctxKeyActorID, strings.TrimSpace(actor))
 }
 
-// WithTrace attaches trace/request identifiers for the audit trail
-// (written when Config.RecordEvents is enabled).
+// WithTrace attaches trace/request identifiers for the audit trail.
 func WithTrace(ctx context.Context, traceID, requestID string) context.Context {
 	ctx = context.WithValue(ctx, ctxKeyTraceID, strings.TrimSpace(traceID))
-	ctx = context.WithValue(ctx, ctxKeyRequestID, strings.TrimSpace(requestID))
-	return ctx
+	return context.WithValue(ctx, ctxKeyRequestID, strings.TrimSpace(requestID))
 }
 
 func actorFromContext(ctx context.Context) string {
@@ -50,8 +47,8 @@ func traceFromContext(ctx context.Context) (string, string) {
 	return traceID, requestID
 }
 
-// recordEvent writes one audit row. It is a no-op unless Config.RecordEvents is enabled,
-// and it never fails the surrounding operation: audit loss is logged, not propagated.
+// recordEvent writes one audit row. It is a no-op unless Config.RecordEvents is enabled and never
+// fails the surrounding operation: losing an audit entry is logged, not propagated.
 func (s *MemoryService) recordEvent(ctx context.Context, eventType model.EventType, itemID *string, namespace string, payload map[string]interface{}) {
 	if !s.config.RecordEvents {
 		return

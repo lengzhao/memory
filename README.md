@@ -103,17 +103,36 @@ Total memories: 4
 
 ```
 memory/
-├── examples/           # 可执行示例（含隔离接入、LLM 提取等）
-│   ├── 01_basic/       # 基础使用（WithIsolation + Service API）
-│   └── 08_extract_demo/# 多轮对话 LLM 提取
-├── model/              # GORM 模型（表结构单一来源）
+├── examples/            # 可执行示例（Scope 接入、幂等写入、TTL、策略、LLM 提取）
+│   ├── 01_basic/        # remember/recall/list/update/forget 全流程
+│   ├── 02_dedupe/       # DedupeKey 幂等
+│   ├── 03_ttl/          # TTL / 滑动续期 / CleanupExpired
+│   ├── 04_callback/     # 生命周期回调
+│   ├── 05_extract/      # LLM 提取
+│   ├── 06_policy/       # 命名空间策略（含通配前缀）
+│   └── 08_extract_demo/ # 多轮对话 LLM 提取落库
+├── model/               # GORM 模型（表结构单一来源）
 │   └── memory.go
-├── service/            # 业务逻辑（Memory、提取、策略、决策等）
-├── store/              # DB 连接与 schema：`Migrate` = AutoMigrate + FTS5
-│   ├── db.go
-│   └── fts.go          # FTS5 虚表与触发器（GORM 无法表达的部分）
+├── service/             # 业务逻辑，按职责拆分
+│   ├── scope.go         # 隔离身份与命名空间布局（Scope）
+│   ├── remember.go      # 写入（幂等、校验、TTL/策略）
+│   ├── recall.go        # 召回 / 列表 / 打分 / 检索
+│   ├── forget.go        # 删除、保留期、索引维护、CAS 更新
+│   ├── extractor.go     # LLM 对话→记忆提取（按 scope 分区缓存）
+│   ├── decision.go      # ADD/UPDATE/DELETE/IGNORE/MERGE 决策
+│   ├── policy.go        # 命名空间策略（精确 + 通配前缀）
+│   ├── janitor.go       # 后台巡检（过期 + 归档保留期）
+│   ├── health.go        # Stats / Health
+│   ├── events.go        # 审计事件
+│   ├── retry.go         # SQLITE_BUSY 退避重试
+│   └── tokenizer.go     # jiebago 中文分词
+├── store/               # DB 连接与 schema：`Migrate` = AutoMigrate + FTS5
+│   ├── db.go            # DSN/pragma、连接池
+│   └── fts.go           # FTS5 虚表与状态同步触发器
 ├── docs/
-│   └── memory.md       # 详细技术方案
+│   ├── memory.md        # 详细技术方案
+│   └── p0-fixes.md      # 隔离/索引/删除的设计取舍
+├── TODO.md              # 后续路线（语义召回、摘要、provider 抽象等）
 ├── go.mod
 └── README.md
 ```
@@ -122,7 +141,7 @@ memory/
 
 > **集成说明**：`import "github.com/lengzhao/memory"` 即可；也可按需引用子包 `model`、`service`、`store`。
 
-## 核心特性 v0.3
+## 核心特性
 
 - ✅ 多 namespace 分层存储 (transient/profile/action/knowledge)
 - ✅ **并发控制**：乐观锁 (`version` 字段)
@@ -155,32 +174,42 @@ memory/
 
 详见 `model/memory.go` 与 `docs/memory.md`。
 
-## 隔离与删除（v0.4）
+## 隔离模型（v0.4）
 
-写入/召回默认 **fail-closed**：必须显式声明身份，否则返回 `UNAUTHORIZED`。
+隔离身份是一个**显式参数**，不是 context 里的隐式值：
 
 ```go
-// 多租户：身份完整（tenant/user/session/agent 四项都要）
-ctx := memory.WithIsolation(context.Background(), tenantID, userID, sessionID, agentID)
-
-// 单用户 / 本地 / 维护任务：显式放开全局命名空间
-ctx := memory.AllowGlobal(context.Background())
+scope := memory.MustScope(tenantID, userID, sessionID, agentID)   // tenant/user/session/agent 四项必填
+svc.Remember(ctx, scope, memory.RememberRequest{...})
+svc.Recall(ctx, scope, memory.RecallRequest{...})
 ```
 
-刻意的行为变更与迁移方式见 [docs/p0-fixes.md](docs/p0-fixes.md)：
-提取缓存按隔离域分区、`Forget` 不再静默落到 transient、硬删除可配置为不留明文副本、
-`MinConfidence` 可关闭，等等。
+忘记传身份是编译错误，而不是运行时的跨租户读写。命名空间布局：
+
+| 类型 | 命名空间 | 可见范围 |
+| --- | --- | --- |
+| `profile` / `action` / `knowledge` | `tenant/<t>/user/<u>/<type>` | 同一用户跨会话共享 |
+| `transient` | `tenant/<t>/user/<u>/session/<s>/agent/<a>/transient` | 单会话单 agent |
+
+单用户 / 本地 / 维护任务用 `memory.GlobalScope()`（数据落在 `profile/default` 等全局命名空间）。
+
+**写入路径唯一**：抽取器与决策引擎的落库都经过 `MemoryService`，索引、版本号、回调、审计不会被绕过。
+
+**删除**：`soft`（可回滚，出索引）、`expire`、`hard`（默认留一份可恢复副本，保留期 `DefaultDeletedRetention`）。
+真正的擦除路径是 `Forget(mode=hard, BackupBeforeHardDelete=false)` 或 `PurgeDeletedNow`。
+"忘记这个用户"直接 `Forget(ctx, scope, memory.ForgetRequest{})` 覆盖该 scope 可读的全部命名空间。
 
 ```go
-// 后台巡检（过期清理 + 归档保留期），宿主不必自己排定时任务
+// 后台巡检（过期清理 + 归档保留期）
 janitor := memory.NewJanitor(svc, memory.JanitorConfig{Interval: time.Hour})
-janitor.Start(ctx)
-defer janitor.Stop()
+janitor.Start(ctx); defer janitor.Stop()
 
 // 健康检查 / 运营指标
-stats, _ := svc.Stats(ctx)   // 条目数、按类型分布、索引是否同步、归档积压
-err := svc.Health(ctx)       // DB 可用 + 检索索引一致
+stats, _ := svc.Stats(ctx)   // 条目分布、索引是否同步、归档积压、抽取失败数
+err := svc.Health(ctx)
 ```
+
+刻意的设计取舍见 [docs/p0-fixes.md](docs/p0-fixes.md)。
 
 ## 许可证
 

@@ -16,7 +16,7 @@ import (
 func main() {
 	ctx := context.Background()
 	// 使用上下文隔离,可选
-	ctx = memory.WithIsolation(ctx, "demo-tenant", "demo-user", "demo-session-001", "assistant")
+	scope := memory.MustScope("demo-tenant", "demo-user", "demo-session-001", "assistant")
 
 	// 配置结构化日志（可选，不配置则使用默认）
 	// 示例：使用 JSON 格式输出到 stdout，级别为 Debug
@@ -46,7 +46,7 @@ func main() {
 
 	// 3. 存储记忆 - 用户偏好
 	fmt.Println("\n=== 2. 存储用户偏好 ===")
-	prefID, err := svc.Remember(ctx, memory.RememberRequest{
+	prefID, err := svc.Remember(ctx, scope, memory.RememberRequest{
 		NamespaceType: memory.NamespaceProfile,
 		Title:         "喜欢的编程语言",
 		Content:       "用户喜欢用Go语言编写后端服务，也喜欢Python进行数据分析",
@@ -62,7 +62,7 @@ func main() {
 
 	// 4. 存储记忆 - 任务/行动
 	fmt.Println("\n=== 3. 存储待办任务 ===")
-	taskID, err := svc.Remember(ctx, memory.RememberRequest{
+	taskID, err := svc.Remember(ctx, scope, memory.RememberRequest{
 		NamespaceType: memory.NamespaceAction,
 		Title:         "完成API文档",
 		Content:       "需要在本周五之前完成memory系统的API文档编写",
@@ -79,7 +79,7 @@ func main() {
 	// 5. 存储带TTL的记忆 - 临时上下文
 	fmt.Println("\n=== 4. 存储临时上下文 (30秒TTL) ===")
 	ttl := 30 // 30秒后过期
-	contextID, err := svc.Remember(ctx, memory.RememberRequest{
+	contextID, err := svc.Remember(ctx, scope, memory.RememberRequest{
 		NamespaceType: memory.NamespaceTransient,
 		Title:         "当前对话上下文",
 		Content:       "用户正在询问关于memory系统的问题",
@@ -94,7 +94,7 @@ func main() {
 
 	// 5.1 按时间列出最近记录（created_at DESC）
 	fmt.Println("\n=== 4.1 列出最近20条记录（按时间倒序） ===")
-	recentItems, err := svc.List(ctx, memory.ListRequest{
+	recentItems, err := svc.List(ctx, scope, memory.ListRequest{
 		TopK:  20,
 		Order: "desc",
 	})
@@ -108,7 +108,7 @@ func main() {
 
 	// 6. 回忆记忆 - 按 namespace type 查询（ctx 自动限域）
 	fmt.Println("\n=== 5. 回忆用户偏好 ===")
-	hits, err := svc.Recall(ctx, memory.RecallRequest{
+	hits, err := svc.Recall(ctx, scope, memory.RecallRequest{
 		NamespaceTypes: []memory.NamespaceType{memory.NamespaceProfile},
 		MinConfidence:  0.5,
 		TopK:           10,
@@ -123,7 +123,7 @@ func main() {
 
 	// 7. 全文搜索
 	fmt.Println("\n=== 6. 全文搜索 '知识星球文档' ===")
-	searchHits, err := svc.Recall(ctx, memory.RecallRequest{
+	searchHits, err := svc.Recall(ctx, scope, memory.RecallRequest{
 		Query: "知识星球文档",
 		TopK:  10,
 	})
@@ -137,7 +137,7 @@ func main() {
 
 	// 8. 标签过滤
 	fmt.Println("\n=== 7. 按标签过滤 'urgent' ===")
-	tagHits, err := svc.Recall(ctx, memory.RecallRequest{
+	tagHits, err := svc.Recall(ctx, scope, memory.RecallRequest{
 		TagsAny: []string{"urgent"},
 		TopK:    10,
 	})
@@ -152,7 +152,7 @@ func main() {
 	// 9. 更新记忆
 	fmt.Println("\n=== 8. 更新任务状态 ===")
 	newContent := "API文档已完成，等待审核"
-	if err := svc.Update(ctx, memory.UpdateRequest{
+	if err := svc.Update(ctx, scope, memory.UpdateRequest{
 		ItemID:          taskID,
 		Content:         &newContent,
 		ExpectedVersion: 1, // 乐观锁：预期版本1
@@ -163,14 +163,14 @@ func main() {
 
 	// 10. 触摸记忆（更新访问统计）
 	fmt.Println("\n=== 9. 触摸记忆（更新访问统计） ===")
-	if err := svc.Touch(ctx, prefID); err != nil {
+	if err := svc.Touch(ctx, scope, prefID); err != nil {
 		log.Fatal(err)
 	}
 	fmt.Println("已更新访问统计")
 
 	// 11. 检查临时上下文（在过期前）
 	fmt.Println("\n=== 10. 检查临时上下文（应该存在） ===")
-	transientHits, _ := svc.Recall(ctx, memory.RecallRequest{
+	transientHits, _ := svc.Recall(ctx, scope, memory.RecallRequest{
 		NamespaceTypes: []memory.NamespaceType{memory.NamespaceTransient},
 	})
 	fmt.Printf("临时上下文: %d 条\n", len(transientHits))
@@ -181,14 +181,14 @@ func main() {
 
 	// 13. 再次检查（应该不存在了）
 	fmt.Println("=== 12. 再次检查临时上下文（应该已过期） ===")
-	transientHits, _ = svc.Recall(ctx, memory.RecallRequest{
+	transientHits, _ = svc.Recall(ctx, scope, memory.RecallRequest{
 		NamespaceTypes: []memory.NamespaceType{memory.NamespaceTransient},
 	})
 	fmt.Printf("临时上下文: %d 条 (已过期被排除)\n", len(transientHits))
 
 	// 14. 软删除记忆
 	fmt.Println("\n=== 13. 软删除任务 ===")
-	count, err := svc.Forget(ctx, memory.ForgetRequest{
+	count, err := svc.Forget(ctx, scope, memory.ForgetRequest{
 		ItemIDs: []string{taskID},
 		Mode:    "soft",
 		Reason:  "任务已完成归档",
@@ -200,7 +200,7 @@ func main() {
 
 	// 15. 验证删除
 	fmt.Println("\n=== 14. 验证删除 ===")
-	hits, _ = svc.Recall(ctx, memory.RecallRequest{
+	hits, _ = svc.Recall(ctx, scope, memory.RecallRequest{
 		NamespaceTypes: []memory.NamespaceType{memory.NamespaceAction},
 	})
 	fmt.Printf("用户任务: %d 条 (已删除的不显示)\n", len(hits))

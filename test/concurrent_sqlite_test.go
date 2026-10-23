@@ -48,8 +48,8 @@ func TestConcurrent_Remember_WithSharedCache(t *testing.T) {
 	ctx := testContext()
 
 	// First, create one item to ensure DB is ready
-	_, err := svc.Remember(ctx, memory.RememberRequest{
-		Content:   "Setup content",
+	_, err := svc.Remember(ctx, testScope(), memory.RememberRequest{
+		Content: "Setup content",
 	})
 	if err != nil {
 		t.Fatalf("Setup failed: %v", err)
@@ -64,8 +64,8 @@ func TestConcurrent_Remember_WithSharedCache(t *testing.T) {
 		wg.Add(1)
 		go func(idx int) {
 			defer wg.Done()
-			_, err := svc.Remember(ctx, memory.RememberRequest{
-				Content:   "Content from goroutine",
+			_, err := svc.Remember(ctx, testScope(), memory.RememberRequest{
+				Content: "Content from goroutine",
 			})
 			if err != nil {
 				errChan <- err
@@ -84,8 +84,7 @@ func TestConcurrent_Remember_WithSharedCache(t *testing.T) {
 	}
 
 	// Verify all created (including setup item) - allow some tolerance for race conditions
-	hits, err := svc.Recall(ctx, memory.RecallRequest{
-	})
+	hits, err := svc.Recall(ctx, testScope(), memory.RecallRequest{})
 	if err != nil {
 		t.Fatalf("Failed to recall: %v", err)
 	}
@@ -107,8 +106,8 @@ func TestConcurrent_Touch_WithSharedCache(t *testing.T) {
 	ctx := testContext()
 
 	// Create item
-	id, err := svc.Remember(ctx, memory.RememberRequest{
-		Content:   "Content",
+	id, err := svc.Remember(ctx, testScope(), memory.RememberRequest{
+		Content: "Content",
 	})
 	if err != nil {
 		t.Fatalf("Failed to create: %v", err)
@@ -123,7 +122,7 @@ func TestConcurrent_Touch_WithSharedCache(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			if err := svc.Touch(ctx, id); err != nil {
+			if err := svc.Touch(ctx, testScope(), id); err != nil {
 				errChan <- err
 			}
 		}()
@@ -155,8 +154,8 @@ func TestConcurrent_RecallDuringWrite_WithSharedCache(t *testing.T) {
 	go func() {
 		defer wg.Done()
 		for i := 0; i < 20; i++ {
-			_, err := svc.Remember(ctx, memory.RememberRequest{
-				Content:   "Write content",
+			_, err := svc.Remember(ctx, testScope(), memory.RememberRequest{
+				Content: "Write content",
 			})
 			if err != nil {
 				t.Errorf("Write failed: %v", err)
@@ -169,8 +168,7 @@ func TestConcurrent_RecallDuringWrite_WithSharedCache(t *testing.T) {
 	go func() {
 		defer wg.Done()
 		for i := 0; i < 20; i++ {
-			_, err := svc.Recall(ctx, memory.RecallRequest{
-			})
+			_, err := svc.Recall(ctx, testScope(), memory.RecallRequest{})
 			if err != nil {
 				t.Errorf("Read failed: %v", err)
 			}
@@ -190,8 +188,8 @@ func TestConcurrent_UpdateConflict_WithSharedCache(t *testing.T) {
 	ctx := testContext()
 
 	// Create item
-	id, err := svc.Remember(ctx, memory.RememberRequest{
-		Content:   "Original",
+	id, err := svc.Remember(ctx, testScope(), memory.RememberRequest{
+		Content: "Original",
 	})
 	if err != nil {
 		t.Fatalf("Failed to create: %v", err)
@@ -209,7 +207,7 @@ func TestConcurrent_UpdateConflict_WithSharedCache(t *testing.T) {
 		go func(idx int) {
 			defer wg.Done()
 			newContent := "Updated by goroutine"
-			err := svc.Update(ctx, memory.UpdateRequest{
+			err := svc.Update(ctx, testScope(), memory.UpdateRequest{
 				ItemID:          id,
 				Content:         &newContent,
 				ExpectedVersion: 1, // All try to update version 1

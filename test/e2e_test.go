@@ -61,7 +61,12 @@ func (tdb *TestDB) Cleanup() {
 
 // context returns a background context for tests
 func testContext() context.Context {
-	return memory.AllowGlobal(context.Background())
+	return context.Background()
+}
+
+// testScope is the isolation identity used by the end-to-end tests.
+func testScope() memory.Scope {
+	return memory.MustScope("t1", "u1", "s1", "agent")
 }
 
 func TestExtractE2E_RealLLM_DryRun(t *testing.T) {
@@ -75,7 +80,7 @@ func TestExtractE2E_RealLLM_DryRun(t *testing.T) {
 	defer cancel()
 
 	dialog := "我叫王小明，我喜欢深色主题，并且下周三要提交季度复盘。"
-	result, err := extractor.Extract(ctx, memory.ExtractRequest{
+	result, err := extractor.Extract(ctx, testScope(), memory.ExtractRequest{
 		DialogText:    dialog,
 		MinConfidence: 0.7,
 		DryRun:        true,
@@ -136,7 +141,7 @@ func TestExtractE2E_RealLLM_CacheHit(t *testing.T) {
 
 	dialog := "我最近在学习Go并发，尤其是channel的最佳实践。"
 
-	first, err := extractor.Extract(ctx, memory.ExtractRequest{
+	first, err := extractor.Extract(ctx, testScope(), memory.ExtractRequest{
 		DialogText:    dialog,
 		MinConfidence: 0.7,
 		DryRun:        true,
@@ -149,7 +154,7 @@ func TestExtractE2E_RealLLM_CacheHit(t *testing.T) {
 		t.Fatalf("expected first status completed/cached, got %q", first.Status)
 	}
 
-	second, err := extractor.Extract(ctx, memory.ExtractRequest{
+	second, err := extractor.Extract(ctx, testScope(), memory.ExtractRequest{
 		DialogText:    dialog,
 		MinConfidence: 0.7,
 		DryRun:        true,

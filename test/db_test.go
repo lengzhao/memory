@@ -63,11 +63,11 @@ func TestDBMigrate_LLMTables(t *testing.T) {
 
 	// Test DialogExtraction
 	extraction := model.DialogExtraction{
-		ID:        model.GenerateID(),
+		ID:         model.GenerateID(),
 		DialogText: "Test dialog",
 		DialogHash: "abc123",
-		ConfigRef: "llm=runtime:test-config;prompt=prompt-default-v3",
-		Status:    model.ExtractionStatusCompleted,
+		ConfigRef:  "llm=runtime:test-config;prompt=prompt-default-v3",
+		Status:     model.ExtractionStatusCompleted,
 	}
 	if err := tdb.DB.WithContext(ctx).Create(&extraction).Error; err != nil {
 		t.Fatalf("Failed to create dialog extraction: %v", err)

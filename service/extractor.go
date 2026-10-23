@@ -88,9 +88,9 @@ func NewExtractor(db *gorm.DB) *Extractor {
 //	    Model:    "gpt-4o",
 //	}
 //	result, err := service.QuickExtract(ctx, db, dialogText, cfg)
-func QuickExtract(ctx context.Context, db *gorm.DB, dialogText string, llmCfg *model.LLMConfig) (*ExtractResult, error) {
+func QuickExtract(ctx context.Context, db *gorm.DB, scope Scope, dialogText string, llmCfg *model.LLMConfig) (*ExtractResult, error) {
 	extractor := NewExtractor(db)
-	return extractor.Extract(ctx, ExtractRequest{
+	return extractor.Extract(ctx, scope, ExtractRequest{
 		DialogText:       dialogText,
 		LLMConfig:        llmCfg,
 		ExtractionPrompt: nil, // Use builtin
@@ -174,12 +174,15 @@ type DecisionExecutionSummary struct {
 // Caching: a completed extraction is reused for 48h, scoped by isolation identity (scope_key)
 // and only when the request is a dry run. A cached row is never used to answer a request that
 // actually persists, so a dry-run probe (or a retried write) cannot leave memories unwritten.
-func (e *Extractor) Extract(ctx context.Context, req ExtractRequest) (*ExtractResult, error) {
+func (e *Extractor) Extract(ctx context.Context, scope Scope, req ExtractRequest) (*ExtractResult, error) {
+	if err := scope.Validate(); err != nil {
+		return nil, err
+	}
 	start := time.Now()
 
 	// Idempotency key: stable when only DialogText is set (backwards compatible)
 	hash := extractionCacheKey(req)
-	scopeKey := extractionScopeKey(ctx)
+	scopeKey := scope.String()
 
 	// Check for existing extraction within 48 hours, for this isolation scope only.
 	// Dry runs always call the model: they are probes and must not poison the cache either.
@@ -321,12 +324,12 @@ func (e *Extractor) Extract(ctx context.Context, req ExtractRequest) (*ExtractRe
 	if !req.DryRun {
 		if req.UseDecisionEngine {
 			// New flow: extract → find similar → decide → persist
-			summary, err := e.persistWithDecisionEngine(ctx, filtered, req)
+			summary, err := e.persistWithDecisionEngine(ctx, scope, filtered, req)
 			if err != nil {
 				logger.WarnContext(ctx, "decision engine persist failed, falling back to simple persist", "error", err)
 				// Fallback to simple persist
 				for _, mem := range filtered {
-					if err := e.persistMemory(ctx, mem); err != nil {
+					if err := e.persistMemory(ctx, scope, mem); err != nil {
 						logger.WarnContext(ctx, "fallback persist failed", "error", err)
 					}
 				}
@@ -337,7 +340,7 @@ func (e *Extractor) Extract(ctx context.Context, req ExtractRequest) (*ExtractRe
 			// Simple persist (original behavior)
 			persisted := 0
 			for _, mem := range filtered {
-				if err := e.persistMemory(ctx, mem); err != nil {
+				if err := e.persistMemory(ctx, scope, mem); err != nil {
 					logger.WarnContext(ctx, "failed to persist memory", "title", mem.Title, "error", err)
 				} else {
 					persisted++
@@ -473,31 +476,12 @@ func (e *Extractor) callOpenAI(ctx context.Context, cfg model.LLMConfig, prompt 
 }
 
 // persistMemory saves extracted memory to database
-func (e *Extractor) persistMemory(ctx context.Context, mem ExtractedMemory) error {
-	// Scope duplicate checks to the resolved namespace to avoid cross-session leakage.
-	meta, isolated, err := resolveIsolation(ctx)
-	if err != nil {
-		return err
-	}
-	ns, err := resolveTargetNamespace(meta, isolated, "", mem.Namespace)
-	if err != nil {
-		return err
-	}
-
-	var existing model.MemoryItem
-	err = e.db.WithContext(ctx).
-		Where("namespace = ? AND namespace_type = ? AND content = ?", ns, mem.Namespace, mem.Content).
-		First(&existing).Error
-	if err == nil {
-		// Duplicate found, skip
-		return nil
-	}
-	if !errors.Is(err, gorm.ErrRecordNotFound) {
-		return err
-	}
-
-	svc := NewMemoryService(e.db)
-	_, err = svc.Remember(ctx, RememberRequest{
+// persistMemory writes one extracted memory. Duplicate detection is expressed as a content hash
+// (DedupeKey) rather than a read-then-write, so concurrent extractions of the same dialog cannot
+// both insert the same fact.
+func (e *Extractor) persistMemory(ctx context.Context, scope Scope, mem ExtractedMemory) error {
+	key := contentDedupeKey(mem)
+	_, err := NewMemoryService(e.db).Remember(ctx, scope, RememberRequest{
 		NamespaceType: mem.Namespace,
 		Title:         mem.Title,
 		Content:       mem.Content,
@@ -506,12 +490,20 @@ func (e *Extractor) persistMemory(ctx context.Context, mem ExtractedMemory) erro
 		SourceType:    model.SourceTypeAgent,
 		Importance:    mem.Importance,
 		Confidence:    mem.Confidence,
+		DedupeKey:     &key,
 	})
 	return err
 }
 
+// contentDedupeKey identifies a memory by its scope-independent content, which is what makes
+// extraction idempotent without a race-prone lookup.
+func contentDedupeKey(mem ExtractedMemory) string {
+	sum := sha256.Sum256([]byte(string(mem.Namespace) + "\x00" + mem.Title + "\x00" + mem.Content))
+	return "content:" + hex.EncodeToString(sum[:16])
+}
+
 // persistWithDecisionEngine uses the new flow: extract → find similar → decide → persist
-func (e *Extractor) persistWithDecisionEngine(ctx context.Context, memories []ExtractedMemory, req ExtractRequest) (*DecisionExecutionSummary, error) {
+func (e *Extractor) persistWithDecisionEngine(ctx context.Context, scope Scope, memories []ExtractedMemory, req ExtractRequest) (*DecisionExecutionSummary, error) {
 	if len(memories) == 0 {
 		return &DecisionExecutionSummary{}, nil
 	}
@@ -533,7 +525,7 @@ func (e *Extractor) persistWithDecisionEngine(ctx context.Context, memories []Ex
 	// Step 1: Find similar memories for all candidates
 	allSimilarMemories := make(map[string][]SimilarMemory)
 	for _, mem := range memories {
-		similar, err := decisionEngine.FindSimilarMemories(ctx, mem, topK)
+		similar, err := decisionEngine.FindSimilarMemories(ctx, scope, mem, topK)
 		if err != nil {
 			logger.WarnContext(ctx, "failed to find similar memories", "temp_id", mem.TempID, "error", err)
 			continue
@@ -556,7 +548,7 @@ func (e *Extractor) persistWithDecisionEngine(ctx context.Context, memories []Ex
 	}
 
 	// Step 4: Execute decisions
-	execResult, err := decisionEngine.ExecuteDecisions(ctx, memories, decisionResult.Decisions)
+	execResult, err := decisionEngine.ExecuteDecisions(ctx, scope, memories, decisionResult.Decisions)
 	if err != nil {
 		return nil, fmt.Errorf("failed to execute decisions: %w", err)
 	}
@@ -658,13 +650,6 @@ func extractionCacheKey(req ExtractRequest) string {
 	h := sha256.New()
 	h.Write([]byte(b.String()))
 	return hex.EncodeToString(h.Sum(nil))[:32]
-}
-
-// extractionScopeKey derives the isolation scope of an extraction request. Extractions are
-// cached per scope so one tenant's result can never be replayed for another.
-func extractionScopeKey(ctx context.Context) string {
-	meta := isolationFromContextLoose(ctx)
-	return strings.Join([]string{meta.TenantID, meta.UserID, meta.SessionID, meta.AgentID}, "|")
 }
 
 func calculateHash(text string) string {

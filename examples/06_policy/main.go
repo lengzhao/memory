@@ -13,7 +13,7 @@ import (
 
 func main() {
 	ctx := context.Background()
-	ctx = memory.WithIsolation(ctx, "demo-tenant", "demo-user", "policy-session", "assistant")
+	scope := memory.MustScope("demo-tenant", "demo-user", "policy-session", "assistant")
 
 	actionNS := "tenant/demo-tenant/user/demo-user/action"
 	knowledgeNS := "tenant/demo-tenant/user/demo-user/knowledge"
@@ -107,7 +107,7 @@ func main() {
 	svc := memory.NewMemoryService(db)
 
 	// 为project-a创建任务（会应用我们设置的7天TTL）
-	taskID, err := svc.Remember(ctx, memory.RememberRequest{
+	taskID, err := svc.Remember(ctx, scope, memory.RememberRequest{
 		NamespaceType: memory.NamespaceAction,
 		Title:         "项目A的紧急任务",
 		Content:       "需要在一周内完成API接口开发",
@@ -120,7 +120,7 @@ func main() {
 	fmt.Printf("   创建任务: %s (应用 action namespace 的7天TTL策略)\n", taskID)
 
 	// 为knowledge创建知识（永不过期）
-	kbID, err := svc.Remember(ctx, memory.RememberRequest{
+	kbID, err := svc.Remember(ctx, scope, memory.RememberRequest{
 		NamespaceType: memory.NamespaceKnowledge,
 		Title:         "VIP客户信息",
 		Content:       "重要客户的关键业务信息",
@@ -133,7 +133,7 @@ func main() {
 	fmt.Printf("   创建知识: %s (应用 knowledge namespace 的永不过期策略)\n", kbID)
 
 	// 再创建一条knowledge（同namespace，使用同策略）
-	normalKbID, err := svc.Remember(ctx, memory.RememberRequest{
+	normalKbID, err := svc.Remember(ctx, scope, memory.RememberRequest{
 		NamespaceType: memory.NamespaceKnowledge,
 		Title:         "一般知识点",
 		Content:       "普通的知识条目",

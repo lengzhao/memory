@@ -11,7 +11,7 @@ import (
 	"github.com/lengzhao/memory"
 )
 
-// Example demonstrates basic usage of the memory package.
+// Example demonstrates storing a memory row directly through the store layer.
 func Example() {
 	// Initialize database (DefaultConfig has AutoMigrate enabled)
 	cfg := memory.DefaultConfig()
@@ -49,7 +49,7 @@ func Example() {
 	// Output: Created item with ID length: 26
 }
 
-// Example_memoryService demonstrates using MemoryService for common operations.
+// Example_memoryService demonstrates the everyday remember/recall path.
 func Example_memoryService() {
 	cfg := memory.DefaultConfig()
 	cfg.Path = ":memory:"
@@ -59,13 +59,12 @@ func Example_memoryService() {
 	}
 	defer memory.Close(db)
 
-	// Create service
+	// A scope is the isolation identity: every call states who it acts for.
+	scope := memory.MustScope("t1", "u1", "s1", "assistant")
 	svc := memory.NewMemoryService(db)
-	ctx := memory.AllowGlobal(context.Background())
-	ctx = memory.WithIsolation(ctx, "t1", "u1", "s1", "assistant")
+	ctx := context.Background()
 
-	// Store a memory
-	id, err := svc.Remember(ctx, memory.RememberRequest{
+	id, err := svc.Remember(ctx, scope, memory.RememberRequest{
 		NamespaceType: memory.NamespaceProfile,
 		Title:         "Theme Preference",
 		Content:       "User prefers dark theme",
@@ -76,10 +75,9 @@ func Example_memoryService() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	fmt.Printf("Stored memory: %s...\n", id[:8])
+	fmt.Printf("Stored memory id length: %d\n", len(id))
 
-	// Recall memories
-	hits, err := svc.Recall(ctx, memory.RecallRequest{
+	hits, err := svc.Recall(ctx, scope, memory.RecallRequest{
 		NamespaceTypes: []memory.NamespaceType{memory.NamespaceProfile},
 		TopK:           10,
 	})
@@ -87,10 +85,12 @@ func Example_memoryService() {
 		log.Fatal(err)
 	}
 	fmt.Printf("Found %d memories\n", len(hits))
+	// Output: Stored memory id length: 26
+	// Found 1 memories
 }
 
-// Example_memoryService_contextIsolation demonstrates context-based isolation.
-func Example_memoryService_contextIsolation() {
+// Example_memoryService_scopeIsolation shows that memories do not cross sessions.
+func Example_memoryService_scopeIsolation() {
 	cfg := memory.DefaultConfig()
 	cfg.Path = ":memory:"
 	db, err := memory.InitDB(cfg)
@@ -100,51 +100,122 @@ func Example_memoryService_contextIsolation() {
 	defer memory.Close(db)
 
 	svc := memory.NewMemoryService(db)
+	ctx := context.Background()
 
-	ctxS1 := memory.AllowGlobal(context.Background())
-	ctxS1 = memory.WithIsolation(ctxS1, "t1", "u1", "s1", "planner")
+	// Same user, different sessions: transient memories stay separate.
+	session1 := memory.MustScope("t1", "u1", "s1", "planner")
+	session2 := memory.MustScope("t1", "u1", "s2", "planner")
 
-	ctxS2 := memory.AllowGlobal(context.Background())
-	ctxS2 = memory.WithIsolation(ctxS2, "t1", "u1", "s2", "planner")
-
-	_, err = svc.Remember(ctxS1, memory.RememberRequest{
-		NamespaceType: memory.NamespaceTransient,
-		Content:       "only-in-session-1",
-		SourceType:    memory.SourceUser,
-	})
-	if err != nil {
-		log.Fatal(err)
+	for scope, content := range map[memory.Scope]string{
+		session1: "only-in-session-1",
+		session2: "only-in-session-2",
+	} {
+		if _, err := svc.Remember(ctx, scope, memory.RememberRequest{
+			NamespaceType: memory.NamespaceTransient,
+			Content:       content,
+			SourceType:    memory.SourceUser,
+		}); err != nil {
+			log.Fatal(err)
+		}
 	}
 
-	_, err = svc.Remember(ctxS2, memory.RememberRequest{
-		NamespaceType: memory.NamespaceTransient,
-		Content:       "only-in-session-2",
-		SourceType:    memory.SourceUser,
-	})
-	if err != nil {
-		log.Fatal(err)
+	count := func(scope memory.Scope) int {
+		hits, err := svc.Recall(ctx, scope, memory.RecallRequest{
+			NamespaceTypes: []memory.NamespaceType{memory.NamespaceTransient},
+			TopK:           10,
+		})
+		if err != nil {
+			log.Fatal(err)
+		}
+		return len(hits)
 	}
 
-	hitsS1, err := svc.Recall(ctxS1, memory.RecallRequest{
-		NamespaceTypes: []memory.NamespaceType{memory.NamespaceTransient},
+	// Profile memories, by contrast, are shared across the user's sessions.
+	if _, err := svc.Remember(ctx, session1, memory.RememberRequest{
+		NamespaceType: memory.NamespaceProfile,
+		Content:       "prefers dark theme",
+		Confidence:    0.9,
+	}); err != nil {
+		log.Fatal(err)
+	}
+	profileHits, err := svc.Recall(ctx, session2, memory.RecallRequest{
+		NamespaceTypes: []memory.NamespaceType{memory.NamespaceProfile},
 		TopK:           10,
 	})
 	if err != nil {
 		log.Fatal(err)
 	}
-	hitsS2, err := svc.Recall(ctxS2, memory.RecallRequest{
-		NamespaceTypes: []memory.NamespaceType{memory.NamespaceTransient},
-		TopK:           10,
-	})
-	if err != nil {
-		log.Fatal(err)
-	}
 
-	fmt.Printf("s1=%d,s2=%d\n", len(hitsS1), len(hitsS2))
-	// Output: s1=1,s2=1
+	fmt.Printf("session1 transient=%d, session2 transient=%d, profile visible from session2=%d\n",
+		count(session1), count(session2), len(profileHits))
+	// Output: session1 transient=1, session2 transient=1, profile visible from session2=1
 }
 
-// Example_extractor demonstrates automatic memory extraction from dialog.
+// Example_globalScope shows single-user deployments, which use the global namespaces.
+func Example_globalScope() {
+	cfg := memory.DefaultConfig()
+	cfg.Path = ":memory:"
+	db, err := memory.InitDB(cfg)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer memory.Close(db)
+
+	svc := memory.NewMemoryService(db)
+	scope := memory.GlobalScope()
+
+	if _, err := svc.Remember(context.Background(), scope, memory.RememberRequest{
+		NamespaceType: memory.NamespaceKnowledge,
+		Content:       "SQLite uses WAL for concurrent readers",
+		Confidence:    0.9,
+	}); err != nil {
+		log.Fatal(err)
+	}
+
+	var item memory.MemoryItem
+	if err := db.First(&item).Error; err != nil {
+		log.Fatal(err)
+	}
+	fmt.Printf("namespace: %s\n", item.Namespace)
+	// Output: namespace: knowledge/default
+}
+
+// Example_remember_dedupeKey shows idempotent writes.
+func Example_remember_dedupeKey() {
+	cfg := memory.DefaultConfig()
+	cfg.Path = ":memory:"
+	db, err := memory.InitDB(cfg)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer memory.Close(db)
+
+	svc := memory.NewMemoryService(db)
+	scope := memory.MustScope("t1", "u1", "s1", "importer")
+	ctx := context.Background()
+
+	key := "issue-1234"
+	req := memory.RememberRequest{
+		NamespaceType: memory.NamespaceAction,
+		Content:       "Follow up on issue 1234",
+		Confidence:    0.9,
+		DedupeKey:     &key,
+	}
+
+	first, err := svc.Remember(ctx, scope, req)
+	if err != nil {
+		log.Fatal(err)
+	}
+	second, err := svc.Remember(ctx, scope, req)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	fmt.Printf("same memory: %v\n", first == second)
+	// Output: same memory: true
+}
+
+// Example_extractor demonstrates automatic extraction. DryRun previews without writing.
 func Example_extractor() {
 	db, err := memory.InitDB(memory.DefaultConfig())
 	if err != nil {
@@ -152,24 +223,20 @@ func Example_extractor() {
 	}
 	defer memory.Close(db)
 
-	// Create extractor
 	extractor := memory.NewExtractor(db)
+	scope := memory.MustScope("t1", "u1", "s1", "extractor")
 
-	// Extract memories from dialog (DryRun = preview only)
-	req := memory.ExtractRequest{
+	result, err := extractor.Extract(context.Background(), scope, memory.ExtractRequest{
 		DialogText:    "我喜欢用深色主题，浅色主题太刺眼了",
 		MinConfidence: 0.7,
 		DryRun:        true,
-	}
-
-	result, err := extractor.Extract(memory.AllowGlobal(context.Background()), req)
+		LLMConfig:     &memory.LLMConfig{APIKey: "sk-...", Model: "gpt-4o-mini"},
+	})
 	if err != nil {
 		log.Fatal(err)
 	}
 
 	fmt.Printf("Status: %s\n", result.Status)
-	fmt.Printf("Found %d memories\n", len(result.Memories))
-
 	for _, mem := range result.Memories {
 		fmt.Printf("- [%s] %s (confidence: %.2f)\n", mem.Namespace, mem.Title, mem.Confidence)
 	}

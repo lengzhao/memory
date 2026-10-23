@@ -18,7 +18,7 @@ func TestTTL_FixedExpiration(t *testing.T) {
 
 	// Create item with 1 second TTL
 	ttl := 1
-	id, err := svc.Remember(ctx, memory.RememberRequest{
+	id, err := svc.Remember(ctx, testScope(), memory.RememberRequest{
 		NamespaceType: memory.NamespaceTransient,
 		Content:       "Short lived content",
 		TTLSeconds:    &ttl,
@@ -28,8 +28,7 @@ func TestTTL_FixedExpiration(t *testing.T) {
 	}
 
 	// Should be found immediately
-	hits, err := svc.Recall(ctx, memory.RecallRequest{
-	})
+	hits, err := svc.Recall(ctx, testScope(), memory.RecallRequest{})
 	if err != nil {
 		t.Fatalf("Failed to recall: %v", err)
 	}
@@ -41,8 +40,7 @@ func TestTTL_FixedExpiration(t *testing.T) {
 	time.Sleep(2 * time.Second)
 
 	// Should not be found (expired excluded by default)
-	hits, err = svc.Recall(ctx, memory.RecallRequest{
-	})
+	hits, err = svc.Recall(ctx, testScope(), memory.RecallRequest{})
 	if err != nil {
 		t.Fatalf("Failed to recall: %v", err)
 	}
@@ -68,7 +66,7 @@ func TestTTL_IncludeExpired(t *testing.T) {
 
 	// Create item with 1 second TTL
 	ttl := 1
-	_, err := svc.Remember(ctx, memory.RememberRequest{
+	_, err := svc.Remember(ctx, testScope(), memory.RememberRequest{
 		Content:    "Content",
 		TTLSeconds: &ttl,
 	})
@@ -80,14 +78,13 @@ func TestTTL_IncludeExpired(t *testing.T) {
 	time.Sleep(2 * time.Second)
 
 	// Should not be found without IncludeExpired
-	hits, _ := svc.Recall(ctx, memory.RecallRequest{
-	})
+	hits, _ := svc.Recall(ctx, testScope(), memory.RecallRequest{})
 	if len(hits) != 0 {
 		t.Error("Should not find expired item without IncludeExpired")
 	}
 
 	// Should be found with IncludeExpired
-	hits, err = svc.Recall(ctx, memory.RecallRequest{
+	hits, err = svc.Recall(ctx, testScope(), memory.RecallRequest{
 		IncludeExpired: true,
 	})
 	if err != nil {
@@ -108,7 +105,7 @@ func TestTTL_CleanupExpired(t *testing.T) {
 
 	// Create item with very short TTL and wait for it to expire
 	ttl := 1 // 1 second
-	id, err := svc.Remember(ctx, memory.RememberRequest{
+	id, err := svc.Remember(ctx, testScope(), memory.RememberRequest{
 		Content:    "Expired content",
 		TTLSeconds: &ttl,
 	})
@@ -146,7 +143,7 @@ func TestTTL_RenewExpiration(t *testing.T) {
 
 	// Create item with short TTL
 	ttl := 1
-	id, err := svc.Remember(ctx, memory.RememberRequest{
+	id, err := svc.Remember(ctx, testScope(), memory.RememberRequest{
 		Content:    "Content to renew",
 		TTLSeconds: &ttl,
 	})
@@ -161,7 +158,7 @@ func TestTTL_RenewExpiration(t *testing.T) {
 
 	// Renew for another hour
 	newTTL := 3600
-	err = svc.RenewExpiration(ctx, id, newTTL)
+	err = svc.RenewExpiration(ctx, testScope(), id, newTTL)
 	if err != nil {
 		t.Fatalf("Failed to renew: %v", err)
 	}
@@ -188,7 +185,7 @@ func TestTTL_SlidingRenewal(t *testing.T) {
 
 	// Create item with TTL
 	ttl := 60
-	id, err := svc.Remember(ctx, memory.RememberRequest{
+	id, err := svc.Remember(ctx, testScope(), memory.RememberRequest{
 		Content:    "Sliding TTL content",
 		TTLSeconds: &ttl,
 	})
@@ -197,7 +194,7 @@ func TestTTL_SlidingRenewal(t *testing.T) {
 	}
 
 	// Touch with renewal every 3rd access
-	renewed, err := svc.TouchWithRenew(ctx, id, 3, 120)
+	renewed, err := svc.TouchWithRenew(ctx, testScope(), id, 3, 120)
 	if err != nil {
 		t.Fatalf("First touch failed: %v", err)
 	}
@@ -205,7 +202,7 @@ func TestTTL_SlidingRenewal(t *testing.T) {
 		t.Error("Should not renew on first touch")
 	}
 
-	renewed, err = svc.TouchWithRenew(ctx, id, 3, 120)
+	renewed, err = svc.TouchWithRenew(ctx, testScope(), id, 3, 120)
 	if err != nil {
 		t.Fatalf("Second touch failed: %v", err)
 	}
@@ -214,7 +211,7 @@ func TestTTL_SlidingRenewal(t *testing.T) {
 	}
 
 	// Third touch should renew
-	renewed, err = svc.TouchWithRenew(ctx, id, 3, 120)
+	renewed, err = svc.TouchWithRenew(ctx, testScope(), id, 3, 120)
 	if err != nil {
 		t.Fatalf("Third touch failed: %v", err)
 	}
