@@ -28,7 +28,6 @@ func main() {
 	}
 	defer memory.Close(db)
 
-
 	fmt.Println("=== Namespace策略管理示例 ===")
 
 	// 1. 创建PolicyManager

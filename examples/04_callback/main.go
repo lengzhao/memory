@@ -26,7 +26,6 @@ func main() {
 	}
 	defer memory.Close(db)
 
-
 	// 事件收集器
 	var events []string
 	var mu sync.Mutex
@@ -67,9 +66,9 @@ func main() {
 	fmt.Println("1. 创建记忆...")
 	id1, _ := svc.Remember(ctx, scope, memory.RememberRequest{
 		NamespaceType: memory.NamespaceTransient,
-		Title:      "测试记忆",
-		Content:    "这是测试内容",
-		SourceType: memory.SourceUser,
+		Title:         "测试记忆",
+		Content:       "这是测试内容",
+		SourceType:    memory.SourceUser,
 	})
 
 	// 2. 更新记忆 - 触发OnUpdated
@@ -85,9 +84,9 @@ func main() {
 	fmt.Println("\n3. 创建并删除记忆...")
 	id2, _ := svc.Remember(ctx, scope, memory.RememberRequest{
 		NamespaceType: memory.NamespaceTransient,
-		Title:      "将被删除的记忆",
-		Content:    "这是临时内容",
-		SourceType: memory.SourceUser,
+		Title:         "将被删除的记忆",
+		Content:       "这是临时内容",
+		SourceType:    memory.SourceUser,
 	})
 	svc.Forget(ctx, scope, memory.ForgetRequest{
 		ItemIDs: []string{id2},
@@ -99,9 +98,9 @@ func main() {
 	ttl := 2 // 2秒后过期
 	id3, _ := svc.Remember(ctx, scope, memory.RememberRequest{
 		NamespaceType: memory.NamespaceTransient,
-		Title:      "即将过期的记忆",
-		Content:    "这是临时内容",
-		TTLSeconds: &ttl,
+		Title:         "即将过期的记忆",
+		Content:       "这是临时内容",
+		TTLSeconds:    &ttl,
 	})
 
 	fmt.Println("   等待过期...")
