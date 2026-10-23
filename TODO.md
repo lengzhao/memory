@@ -38,8 +38,8 @@ P0（正确性 / 隔离 / 删除合规）已在 `dev` 分支完成，实现约�
 - [ ] **schema 版本化**：目前只有 AutoMigrate + 一次性 `DROP INDEX` 特判；需要 version 表与前滚/回滚脚本。
 - [ ] **导出/导入/备份**：JSONL / Markdown 导出、快照恢复、`VACUUM` 与 FTS `optimize` 调度。
 - [ ] **多进程写入**：当前依赖 `busy_timeout` + 退避重试与单连接池；需要单写者队列或按 tenant 分库。
-- [ ] **生命周期**：`Config` 通过 `WithConfig` 可变设置，应改为构造期 options；`WithConfig` 目前须在共享前调用。
-- [ ] **`service/*.go` 继续拆分**：`forget.go` 仍同时承载 CAS 更新与删除，可再分为 `update.go`。
+- [ ] **构造期配置**：`Config` 经可变 `WithConfig` 设置（须在服务被共享前调用），应改为构造期 options。
+- [ ] **`service/*.go` 继续拆分**：`forget.go`（534 行）仍同时承载 CAS 更新、删除与索引维护，可再分为 `update.go` / `purge.go`。
 - [ ] **提取质量评测集**：固定对话 → 期望记忆的回归集，配合 prompt 版本化做离线评估。
 
 ## 已知遗留
